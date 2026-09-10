@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 4;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -96,6 +96,67 @@ export const TABLES = {
       updatedAt: "TEXT NOT NULL",
     },
     indexes: ["CREATE INDEX IF NOT EXISTS idx_combo_name ON combos(name)"],
+  },
+  standardModels: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      publicName: "TEXT UNIQUE NOT NULL",
+      publisher: "TEXT",
+      officialModelId: "TEXT NOT NULL",
+      displayName: "TEXT",
+      lifecycle: "TEXT DEFAULT 'active'",
+      enabled: "INTEGER DEFAULT 1",
+      capabilities: "TEXT NOT NULL DEFAULT '{}'",
+      limits: "TEXT NOT NULL DEFAULT '{}'",
+      policy: "TEXT NOT NULL DEFAULT '{}'",
+      sourceUrl: "TEXT",
+      verifiedAt: "TEXT",
+      catalogVersion: "TEXT",
+      revision: "INTEGER NOT NULL DEFAULT 1",
+      sortOrder: "INTEGER NOT NULL DEFAULT 0",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_standard_models_enabled ON standardModels(enabled)",
+      "CREATE INDEX IF NOT EXISTS idx_standard_models_publisher ON standardModels(publisher)",
+    ],
+  },
+  standardModelProviders: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      standardModelId: "TEXT NOT NULL",
+      providerId: "TEXT NOT NULL",
+      enabled: "INTEGER DEFAULT 1",
+      priority: "INTEGER NOT NULL DEFAULT 1",
+      weight: "INTEGER NOT NULL DEFAULT 100",
+      data: "TEXT NOT NULL DEFAULT '{}'",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_smp_model_provider ON standardModelProviders(standardModelId, providerId)",
+      "CREATE INDEX IF NOT EXISTS idx_smp_model_enabled ON standardModelProviders(standardModelId, enabled)",
+      "CREATE INDEX IF NOT EXISTS idx_smp_provider ON standardModelProviders(providerId)",
+    ],
+  },
+  standardModelMappings: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      providerBindingId: "TEXT NOT NULL",
+      upstreamModelId: "TEXT NOT NULL",
+      enabled: "INTEGER DEFAULT 1",
+      mappingPriority: "INTEGER NOT NULL DEFAULT 1",
+      requestFormats: "TEXT NOT NULL DEFAULT '[]'",
+      operations: "TEXT NOT NULL DEFAULT '[]'",
+      capabilityOverrides: "TEXT NOT NULL DEFAULT '{}'",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_smm_binding ON standardModelMappings(providerBindingId, enabled)",
+      "CREATE INDEX IF NOT EXISTS idx_smm_upstream ON standardModelMappings(upstreamModelId)",
+    ],
   },
   kv: {
     columns: {

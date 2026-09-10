@@ -99,6 +99,11 @@ function getInputTokens(tokens) {
   return prompt < cache ? cache : prompt;
 }
 
+function formatPayload(payload) {
+  if (payload?.redacted) return "Payload content is redacted for privacy. Token, latency, and routing metadata remain available.";
+  return JSON.stringify(payload, null, 2);
+}
+
 export default function RequestDetailsTab() {
   const [details, setDetails] = useState([]);
   const [pagination, setPagination] = useState({
@@ -108,37 +113,53 @@ export default function RequestDetailsTab() {
     totalPages: 0
   });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [dataSource, setDataSource] = useState("");
   const [selectedDetail, setSelectedDetail] = useState(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [providers, setProviders] = useState([]);
+  const [connections, setConnections] = useState([]);
   const [providerNameCache, setProviderNameCache] = useState(null);
   const [filters, setFilters] = useState({
     provider: "",
+    model: "",
+    connectionId: "",
+    status: "",
     startDate: "",
     endDate: ""
   });
 
   const fetchProviders = useCallback(async () => {
     try {
-      const res = await fetch("/api/usage/providers");
-      const data = await res.json();
+      const [providerRes, connectionRes] = await Promise.all([
+        fetch("/api/usage/providers"),
+        fetch("/api/providers"),
+      ]);
+      const data = await providerRes.json();
+      const connectionData = connectionRes.ok ? await connectionRes.json() : {};
       setProviders(data.providers || []);
+      setConnections((connectionData.connections || []).filter((connection) => connection.isActive !== false));
 
       const cache = await fetchProviderNames();
       setProviderNameCache(cache.providerNameCache);
     } catch (error) {
       console.error("Failed to fetch providers:", error);
+      setError("Failed to load usage filters");
     }
   }, []);
 
   const fetchDetails = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
       const params = new URLSearchParams({
         page: pagination.page.toString(),
         pageSize: pagination.pageSize.toString()
       });
       if (filters.provider) params.append("provider", filters.provider);
+      if (filters.model) params.append("model", filters.model);
+      if (filters.connectionId) params.append("connectionId", filters.connectionId);
+      if (filters.status) params.append("status", filters.status);
       if (filters.startDate) params.append("startDate", filters.startDate);
       if (filters.endDate) params.append("endDate", filters.endDate);
 
@@ -146,20 +167,31 @@ export default function RequestDetailsTab() {
       const data = await res.json();
 
       setDetails(data.details || []);
+      setDataSource(data.source || "");
       setPagination(prev => ({ ...prev, ...data.pagination }));
+      if (data.error) setError(data.error);
     } catch (error) {
       console.error("Failed to fetch request details:", error);
+      setError("Failed to load request details");
     } finally {
       setLoading(false);
     }
   }, [pagination.page, pagination.pageSize, filters]);
 
   useEffect(() => {
-    fetchProviders();
+    const timeoutId = window.setTimeout(() => {
+      void fetchProviders();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [fetchProviders]);
 
   useEffect(() => {
-    fetchDetails();
+    const timeoutId = window.setTimeout(() => {
+      void fetchDetails();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [fetchDetails]);
 
   const handleViewDetail = (detail) => {
@@ -175,12 +207,22 @@ export default function RequestDetailsTab() {
     setPagination(prev => ({ ...prev, pageSize: newPageSize, page: 1 }));
   };
 
-  const handleClearFilters = () => {
-    setFilters({ provider: "", startDate: "", endDate: "" });
+  const updateFilter = (key, value) => {
+    setFilters((current) => ({ ...current, [key]: value }));
+    setPagination((current) => ({ ...current, page: 1 }));
   };
+
+  const handleClearFilters = () => {
+    setFilters({ provider: "", model: "", connectionId: "", status: "", startDate: "", endDate: "" });
+    setPagination((current) => ({ ...current, page: 1 }));
+  };
+
+  const hasFilters = Object.values(filters).some(Boolean);
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
+      {error && <div className="flex items-center justify-between gap-3 rounded-lg border border-error/30 bg-error/5 px-4 py-3 text-sm text-error"><span>{error}</span><Button variant="ghost" size="sm" onClick={fetchDetails}>Retry</Button></div>}
+      {dataSource === "usageHistory" && details.length > 0 && <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-text-muted">Showing usage history metadata. Enable Observability to record payload-level request details for new requests.</div>}
       <Card padding="md">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="flex min-w-0 flex-col gap-2">
@@ -188,7 +230,7 @@ export default function RequestDetailsTab() {
             <select
               id="provider-filter"
               value={filters.provider}
-              onChange={(e) => setFilters({ ...filters, provider: e.target.value })}
+              onChange={(e) => updateFilter("provider", e.target.value)}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20",
@@ -204,6 +246,47 @@ export default function RequestDetailsTab() {
               ))}
             </select>
           </div>
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <label htmlFor="model-filter" className="text-sm font-medium text-text-main">Model</label>
+            <input
+              id="model-filter"
+              type="search"
+              value={filters.model}
+              onChange={(e) => updateFilter("model", e.target.value)}
+              placeholder="Search model"
+              className={cn("h-9 w-full min-w-0 rounded-lg border border-black/10 px-3 text-sm text-text-main dark:border-white/10 bg-surface", "focus:outline-none focus:ring-2 focus:ring-primary/20")}
+            />
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <label htmlFor="account-filter" className="text-sm font-medium text-text-main">Account</label>
+            <select
+              id="account-filter"
+              value={filters.connectionId}
+              onChange={(e) => updateFilter("connectionId", e.target.value)}
+              className={cn("h-9 w-full min-w-0 cursor-pointer rounded-lg border border-black/10 px-3 text-sm text-text-main dark:border-white/10 bg-surface", "focus:outline-none focus:ring-2 focus:ring-primary/20")}
+            >
+              <option value="">All Accounts</option>
+              {connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.name || connection.email || connection.id}</option>)}
+            </select>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <label htmlFor="status-filter" className="text-sm font-medium text-text-main">Status</label>
+            <select
+              id="status-filter"
+              value={filters.status}
+              onChange={(e) => updateFilter("status", e.target.value)}
+              className={cn("h-9 w-full min-w-0 cursor-pointer rounded-lg border border-black/10 px-3 text-sm text-text-main dark:border-white/10 bg-surface", "focus:outline-none focus:ring-2 focus:ring-primary/20")}
+            >
+              <option value="">All Statuses</option>
+              <option value="success">Success</option>
+              <option value="ok">OK</option>
+              <option value="error">Error</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
           
           <div className="flex min-w-0 flex-col gap-2">
             <label htmlFor="start-date-filter" className="text-sm font-medium text-text-main">Start Date</label>
@@ -211,7 +294,7 @@ export default function RequestDetailsTab() {
               id="start-date-filter"
               type="datetime-local"
               value={filters.startDate}
-              onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+              onChange={(e) => updateFilter("startDate", e.target.value)}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
@@ -225,7 +308,7 @@ export default function RequestDetailsTab() {
               id="end-date-filter"
               type="datetime-local"
               value={filters.endDate}
-              onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
+              onChange={(e) => updateFilter("endDate", e.target.value)}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
@@ -238,7 +321,7 @@ export default function RequestDetailsTab() {
             <Button 
               variant="ghost" 
               onClick={handleClearFilters}
-              disabled={!filters.provider && !filters.startDate && !filters.endDate}
+              disabled={!hasFilters}
               className="w-full"
             >
               Clear Filters
@@ -266,7 +349,7 @@ export default function RequestDetailsTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                <td colSpan="10" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
@@ -275,8 +358,9 @@ export default function RequestDetailsTab() {
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
-                    No request details found
+                  <td colSpan="10" className="p-8 text-center text-text-muted">
+                    <div>No request details found</div>
+                    <div className="mt-1 text-xs">Enable Observability in Profile to record details for new requests.</div>
                   </td>
                 </tr>
               ) : (
@@ -372,7 +456,7 @@ export default function RequestDetailsTab() {
                 <span className="text-text-muted">Status:</span>{" "}
                 <span className={cn(
                   "font-medium",
-                  selectedDetail.status === "success" ? "text-green-600" : "text-red-600"
+                  selectedDetail.status === "success" || selectedDetail.status === "ok" ? "text-green-600" : "text-red-600"
                 )}>
                   {selectedDetail.status}
                 </span>
@@ -458,14 +542,14 @@ export default function RequestDetailsTab() {
             <div className="space-y-4">
               <CollapsibleSection title="1. Client Request (Input)" defaultOpen={true} icon="input">
                 <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                  {JSON.stringify(selectedDetail.request, null, 2)}
+                  {formatPayload(selectedDetail.request)}
                 </pre>
               </CollapsibleSection>
 
               {selectedDetail.providerRequest && (
                 <CollapsibleSection title="2. Provider Request (Translated)" icon="translate">
                   <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {JSON.stringify(selectedDetail.providerRequest, null, 2)}
+                    {formatPayload(selectedDetail.providerRequest)}
                   </pre>
                 </CollapsibleSection>
               )}
@@ -473,8 +557,10 @@ export default function RequestDetailsTab() {
               {selectedDetail.providerResponse && (
                 <CollapsibleSection title="3. Provider Response (Raw)" icon="data_object">
                   <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {typeof selectedDetail.providerResponse === 'object'
-                      ? JSON.stringify(selectedDetail.providerResponse, null, 2)
+                    {selectedDetail.providerResponse?.redacted
+                      ? formatPayload(selectedDetail.providerResponse)
+                      : typeof selectedDetail.providerResponse === 'object'
+                        ? JSON.stringify(selectedDetail.providerResponse, null, 2)
                       : selectedDetail.providerResponse
                     }
                   </pre>
@@ -498,7 +584,9 @@ export default function RequestDetailsTab() {
                   Content
                 </h4>
                 <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                  {selectedDetail.response?.content || "[No content]"}
+                  {selectedDetail.response?.redacted
+                    ? formatPayload(selectedDetail.response)
+                    : selectedDetail.response?.content || "[No content]"}
                 </pre>
               </CollapsibleSection>
             </div>

@@ -47,10 +47,14 @@ next-env.d.ts
 .bin/*
 data/
 logs/*
+*.sqlite
+*.sqlite3
+*.db
 source/*
 .cursor/*
 docs/*
 !docs/ARCHITECTURE.md
+!docs/STANDARD-MODEL-ROUTING.md
 test/*
 open-sse/test/*
 RM.vn.md

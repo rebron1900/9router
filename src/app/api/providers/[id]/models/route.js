@@ -160,6 +160,18 @@ const PROVIDER_MODELS_CONFIG = {
       errorLabel: "Failed to fetch Codex models"
     })
   },
+  "codebuddy-cn": {
+    customResolver: async () => ({
+      models: getStaticProviderModels("codebuddy-cn"),
+      warning: "CodeBuddy CN does not expose a public models endpoint; using its built-in provider model catalog.",
+    }),
+  },
+  "codebuddy-intl": {
+    customResolver: async () => ({
+      models: getStaticProviderModels("codebuddy-intl"),
+      warning: "CodeBuddy does not expose a public models endpoint; using its built-in provider model catalog.",
+    }),
+  },
   antigravity: {
     url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
     method: "POST",
@@ -524,6 +536,15 @@ export async function GET(request, { params }) {
 
     const config = PROVIDER_MODELS_CONFIG[connection.provider];
     if (!config) {
+      const staticModels = getStaticProviderModels(connection.provider);
+      if (staticModels.length > 0) {
+        return NextResponse.json({
+          provider: connection.provider,
+          connectionId: connection.id,
+          models: staticModels,
+          warning: `Provider ${connection.provider} does not expose a live models endpoint; using the built-in provider model catalog.`,
+        });
+      }
       return NextResponse.json(
         { error: `Provider ${connection.provider} does not support models listing` },
         { status: 400 }

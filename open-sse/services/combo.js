@@ -3,7 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
-import { unavailableResponse } from "../utils/error.js";
+import { errorResponse, unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
 
@@ -277,7 +277,41 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
+function waitWithAbort(ms, signal) {
+  if (!ms || ms <= 0) return Promise.resolve(true);
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer = setTimeout(() => {
+      cleanup();
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      resolve(false);
+    };
+    const cleanup = () => signal?.removeEventListener?.("abort", onAbort);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
+export async function handleComboChat({
+  body,
+  models,
+  handleSingleModel,
+  log,
+  comboName,
+  comboStrategy,
+  comboStickyLimit = 1,
+  autoSwitch = true,
+  // Optional hooks used by standard-model routing. Legacy combos keep the
+  // existing fallback behavior when these are omitted.
+  attemptBudget = null,
+  abortSignal = null,
+  failureClassifier = null,
+  onAttemptResult = null,
+  onAllFailed = null,
+}) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -296,9 +330,16 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
+  let budgetExhausted = false;
+  const failures = [];
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
+    if (abortSignal?.aborted) return errorResponse(499, "Request aborted");
+    if (attemptBudget && !attemptBudget.canAttempt()) {
+      budgetExhausted = true;
+      break;
+    }
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
@@ -306,6 +347,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       
       // Success (2xx) - return response
       if (result.ok) {
+        try { await onAttemptResult?.({ ok: true, model: modelStr, response: result }); } catch { /* telemetry must not affect routing */ }
         log.info("COMBO", `Model ${modelStr} succeeded`);
         return result;
       }
@@ -331,8 +373,27 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      // Check if should fallback to next model. Standard routing supplies a
+      // stricter classifier so malformed requests are not replayed elsewhere.
+      const legacyFailure = checkFallbackError(result.status, errorText);
+      const classifiedFailure = failureClassifier
+        ? (failureClassifier({ status: result.status, errorText, model: modelStr, response: result }) || {})
+        : {};
+      const shouldFallback = classifiedFailure.shouldFallback ?? legacyFailure.shouldFallback;
+      const cooldownMs = classifiedFailure.cooldownMs ?? legacyFailure.cooldownMs;
+      const failure = {
+        ok: false,
+        model: modelStr,
+        provider: String(modelStr).includes("/") ? String(modelStr).split("/", 1)[0] : null,
+        status: result.status,
+        errorText,
+        shouldFallback,
+        retryable: classifiedFailure.retryable ?? shouldFallback,
+        category: classifiedFailure.category || "unknown",
+        response: result,
+      };
+      failures.push(failure);
+      try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
@@ -345,20 +406,46 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
         log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
-        await new Promise(r => setTimeout(r, cooldownMs));
+        if (!await waitWithAbort(cooldownMs, abortSignal)) return errorResponse(499, "Request aborted");
       }
 
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      if (attemptBudget && !attemptBudget.canAttempt()) {
+        budgetExhausted = true;
+        break;
+      }
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
+      const classifiedFailure = failureClassifier
+        ? (failureClassifier({ status: 502, errorText: lastError, model: modelStr, error }) || {})
+        : {};
+      const failure = {
+        ok: false,
+        model: modelStr,
+        provider: String(modelStr).includes("/") ? String(modelStr).split("/", 1)[0] : null,
+        status: classifiedFailure.status || 502,
+        errorText: lastError,
+        shouldFallback: classifiedFailure.shouldFallback ?? true,
+        retryable: classifiedFailure.retryable ?? true,
+        category: classifiedFailure.category || "transport",
+      };
+      failures.push(failure);
+      try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
+      if (failure.shouldFallback === false) break;
+      if (attemptBudget && !attemptBudget.canAttempt()) {
+        budgetExhausted = true;
+        break;
+      }
     }
   }
+
+  if (abortSignal?.aborted) return errorResponse(499, "Request aborted");
 
   // All models failed
   // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
@@ -367,6 +454,18 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
   const status = allDisabled ? 503 : (lastStatus || 503);
   const msg = lastError || "All combo models unavailable";
+
+  if (onAllFailed) {
+    const customResponse = await onAllFailed({
+      status,
+      message: msg,
+      failures,
+      budgetExhausted,
+      earliestRetryAfter,
+      budget: attemptBudget,
+    });
+    if (customResponse) return customResponse;
+  }
 
   if (earliestRetryAfter) {
     const retryHuman = formatRetryAfter(earliestRetryAfter);

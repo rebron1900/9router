@@ -8,6 +8,8 @@ import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamH
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
+import { createErrorResult } from "../../utils/error.js";
+import { extractStandardResponseIdFromChunk } from "@/lib/standardModels/runtime";
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
 // Gemini-family all map to ANTIGRAVITY decoder; unknown sources fall back to OPENAI.
@@ -40,11 +42,101 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
   return createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey);
 }
 
+function streamChunkText(chunk) {
+  if (typeof chunk === "string") return chunk;
+  if (chunk instanceof Uint8Array || ArrayBuffer.isView(chunk)) {
+    try { return new TextDecoder().decode(chunk); } catch { return ""; }
+  }
+  return "";
+}
+
+function inspectStreamFailure(chunk) {
+  const text = streamChunkText(chunk);
+  if (!text) return null;
+  const eventMatch = text.match(/(?:^|\n)event:\s*(error|response\.failed)\s*(?:\n|$)/i);
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trimStart().startsWith("data:")) continue;
+    const data = line.replace(/^\s*data:\s*/, "").trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      const error = parsed?.error || parsed?.response?.error;
+      if (error || parsed?.type === "error" || parsed?.type === "response.failed" || eventMatch) {
+        return {
+          status: Number(error?.status || error?.code) >= 400 ? Number(error.status || error.code) : 502,
+          message: String(error?.message || parsed?.message || "Upstream stream failed"),
+        };
+      }
+    } catch {
+      // A non-JSON SSE line is not enough to classify as an upstream failure.
+    }
+  }
+  return eventMatch ? { status: 502, message: "Upstream stream failed before response output" } : null;
+}
+
+async function primeProviderResponse(providerResponse) {
+  const reader = providerResponse.body?.getReader?.();
+  if (!reader) return { error: new Error("Upstream stream has no readable body") };
+  const bufferedChunks = [];
+  let preflightText = "";
+  try {
+    // A provider can split `event:` and `data:` across transport chunks. Buffer
+    // a small number of chunks until the first SSE frame is complete so a
+    // pre-commit error is not accidentally exposed as a successful stream.
+    while (bufferedChunks.length < 8 && preflightText.length < 128 * 1024) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (next.value === undefined || next.value === null) continue;
+      bufferedChunks.push(next.value);
+      preflightText += streamChunkText(next.value);
+      if (/\r?\n\r?\n/.test(preflightText)) break;
+    }
+    if (bufferedChunks.length === 0) {
+      reader.releaseLock();
+      return { error: new Error("Upstream stream ended before response output") };
+    }
+    const primedBody = new ReadableStream({
+      start(controller) {
+        for (const chunk of bufferedChunks) controller.enqueue(chunk);
+      },
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (next.done) {
+            reader.releaseLock();
+            controller.close();
+          } else {
+            controller.enqueue(next.value);
+          }
+        } catch (error) {
+          try { reader.releaseLock(); } catch { /* already released */ }
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        try { await reader.cancel(reason); } finally { try { reader.releaseLock(); } catch { /* already released */ } }
+      },
+    });
+    return {
+      firstChunk: preflightText,
+      response: new Response(primedBody, {
+        status: providerResponse.status,
+        statusText: providerResponse.statusText,
+        headers: providerResponse.headers,
+      }),
+    };
+  } catch (error) {
+    try { await reader.cancel(error); } catch { /* best effort */ }
+    try { reader.releaseLock(); } catch { /* already released */ }
+    return { error };
+  }
+}
+
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
-  if (onRequestSuccess) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, preflightStream = false, onResponseId = null }) {
+  if (onRequestSuccess && !preflightStream) {
     Promise.resolve()
       .then(onRequestSuccess)
       .catch(err => {
@@ -79,13 +171,40 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     };
   }
 
+  let firstChunk = null;
+  if (preflightStream) {
+    const primed = await primeProviderResponse(providerResponse);
+    if (primed.error) {
+      streamController?.handleError?.(primed.error);
+      return createErrorResult(502, `Upstream stream failed before response output: ${primed.error.message}`);
+    }
+    firstChunk = primed.firstChunk;
+    const failure = inspectStreamFailure(firstChunk);
+    if (failure) {
+      streamController?.handleError?.(new Error(failure.message));
+      return createErrorResult(failure.status, failure.message);
+    }
+    providerResponse = primed.response;
+    const firstResponseId = extractStandardResponseIdFromChunk(firstChunk);
+    if (firstResponseId) onResponseId?.(firstResponseId);
+    if (onRequestSuccess) {
+      Promise.resolve()
+        .then(onRequestSuccess)
+        .catch(err => console.error("[ChatCore] onRequestSuccess failed:", err?.message || err));
+    }
+  }
+
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials });
 
   // Responses passthrough: synthesize response.failed + [DONE] if the stream aborts/stalls before a terminal event
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+  const onResponseChunk = (chunk) => {
+    const responseId = extractStandardResponseIdFromChunk(chunk);
+    if (responseId) onResponseId?.(responseId);
+  };
+  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, onResponseChunk, onResponseChunk);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,

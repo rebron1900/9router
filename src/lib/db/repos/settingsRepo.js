@@ -17,6 +17,16 @@ const DEFAULT_SETTINGS = {
   comboStrategy: "fallback",
   comboStickyRoundRobinLimit: 1,
   comboStrategies: {},
+  standardModelRouting: {
+    enabled: false,
+    modelListMode: "both",
+    defaultPolicy: {
+      fallbackStrategy: "sequential",
+      maxProviderAttempts: 3,
+      maxAccountAttemptsPerProvider: 2,
+      maxGenerationAttempts: 6,
+    },
+  },
   capacityAdapter: {
     vision: { enabled: true, roundRobin: false, models: [] },
     pdf: { enabled: false, roundRobin: false, models: [] },

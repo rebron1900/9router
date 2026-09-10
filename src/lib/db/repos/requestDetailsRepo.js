@@ -77,6 +77,18 @@ function generateDetailId(model) {
   return `${timestamp}-${random}-${modelPart}`;
 }
 
+function appendStatusFilter(conditions, params, status) {
+  if (!status) return;
+  const normalized = String(status).toLowerCase();
+  const values = normalized === "success" || normalized === "ok"
+    ? ["success", "ok"]
+    : normalized === "error" || normalized === "failed"
+      ? ["error", "failed"]
+      : [status];
+  conditions.push(values.length === 1 ? "status = ?" : `status IN (${values.map(() => "?").join(", ")})`);
+  params.push(...values);
+}
+
 function truncateField(obj, maxSize) {
   const str = JSON.stringify(obj || {});
   if (str.length > maxSize) {
@@ -165,36 +177,96 @@ export async function getRequestDetails(filter = {}) {
   const params = [];
 
   if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
-  if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
+  if (filter.model) { conds.push("model LIKE ?"); params.push(`%${filter.model}%`); }
   if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
-  if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
+  appendStatusFilter(conds, params, filter.status);
   if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const cntRow = db.get(`SELECT COUNT(*) as c FROM requestDetails ${where}`, params);
-  const totalItems = cntRow ? cntRow.c : 0;
-
   const page = filter.page || 1;
   const pageSize = filter.pageSize || 50;
-  const totalPages = Math.ceil(totalItems / pageSize);
   const offset = (page - 1) * pageSize;
 
+  const detailCount = cntRow ? cntRow.c : 0;
+  if (detailCount > 0) {
+    const totalPages = Math.ceil(detailCount / pageSize);
+    const rows = db.all(
+      `SELECT data FROM requestDetails ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    );
+    return {
+      details: rows.map((r) => parseJson(r.data, {})),
+      pagination: { page, pageSize, totalItems: detailCount, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
+      source: "requestDetails",
+    };
+  }
+
+  // Observability is optional, but the Usage > Details page should still be
+  // useful when it is disabled. Fall back to the durable usage history and
+  // expose token/routing metadata without fabricating conversation payloads.
+  const historyConds = [];
+  const historyParams = [];
+  if (filter.provider) { historyConds.push("provider = ?"); historyParams.push(filter.provider); }
+  if (filter.model) { historyConds.push("model LIKE ?"); historyParams.push(`%${filter.model}%`); }
+  if (filter.connectionId) { historyConds.push("connectionId = ?"); historyParams.push(filter.connectionId); }
+  appendStatusFilter(historyConds, historyParams, filter.status);
+  if (filter.startDate) { historyConds.push("timestamp >= ?"); historyParams.push(new Date(filter.startDate).toISOString()); }
+  if (filter.endDate) { historyConds.push("timestamp <= ?"); historyParams.push(new Date(filter.endDate).toISOString()); }
+
+  const historyWhere = historyConds.length ? `WHERE ${historyConds.join(" AND ")}` : "";
+  const historyCountRow = db.get(`SELECT COUNT(*) as c FROM usageHistory ${historyWhere}`, historyParams);
+  const totalItems = historyCountRow ? historyCountRow.c : 0;
+  const totalPages = Math.ceil(totalItems / pageSize);
+
   const rows = db.all(
-    `SELECT data FROM requestDetails ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
-    [...params, pageSize, offset]
+    `SELECT id, timestamp, provider, model, connectionId, status, endpoint,
+            promptTokens, completionTokens, cost, tokens
+       FROM usageHistory ${historyWhere}
+      ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`,
+    [...historyParams, pageSize, offset]
   );
-  const details = rows.map((r) => parseJson(r.data, {}));
+  const details = rows.map((row) => {
+    const tokens = parseJson(row.tokens, {}) || {};
+    if (tokens.prompt_tokens === undefined && tokens.input_tokens === undefined) {
+      tokens.prompt_tokens = row.promptTokens || 0;
+    }
+    if (tokens.completion_tokens === undefined && tokens.output_tokens === undefined) {
+      tokens.completion_tokens = row.completionTokens || 0;
+    }
+    return {
+      id: `usage-${row.id}`,
+      timestamp: row.timestamp,
+      provider: row.provider,
+      model: row.model,
+      connectionId: row.connectionId,
+      status: row.status || "ok",
+      endpoint: row.endpoint || null,
+      cost: row.cost || 0,
+      latency: { ttft: 0, total: 0 },
+      tokens,
+      request: { redacted: true },
+      response: { redacted: true },
+      source: "usageHistory",
+    };
+  });
 
   return {
     details,
     pagination: { page, pageSize, totalItems, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
+    source: "usageHistory",
   };
 }
 
 export async function getDistinctProviders() {
   const db = await getAdapter();
-  const rows = db.all(`SELECT DISTINCT provider FROM requestDetails WHERE provider IS NOT NULL ORDER BY provider ASC`);
+  const rows = db.all(`
+    SELECT provider FROM requestDetails WHERE provider IS NOT NULL
+    UNION
+    SELECT provider FROM usageHistory WHERE provider IS NOT NULL
+    ORDER BY provider ASC
+  `);
   return rows.map((r) => r.provider);
 }
 

@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getStandardModelByName, getStandardModelBindings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -20,10 +20,24 @@ import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActi
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
+import { detectFormat } from "open-sse/services/provider.js";
+import { planStandardModelCandidates } from "@/lib/standardModels/planner";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import {
+  STANDARD_ROUTE_DEFAULTS,
+  buildStandardRouteErrorResponse,
+  classifyStandardRouteFailure,
+  createStandardRouteBudget,
+  getStandardProviderHealthKey,
+  getStandardProviderHealth,
+  recordStandardProviderFailure,
+  recordStandardProviderSuccess,
+  getStandardResponseAffinity,
+  recordStandardResponseAffinity,
+} from "@/lib/standardModels/runtime";
 
 /**
  * Handle chat completion request
@@ -91,6 +105,25 @@ export async function handleChat(request, clientRawRequest = null) {
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   const requiredCapabilities = detectRequiredCapabilities(body);
+
+  // A standard model is a provider-neutral public name. Explicit provider/model
+  // requests continue through the legacy path unchanged.
+  const standardRouting = settings.standardModelRouting || {};
+  if (standardRouting.enabled === true && !modelStr.includes("/")) {
+    const standardModel = await getStandardModelByName(modelStr);
+    if (standardModel) {
+      return handleStandardModelChat({
+        body,
+        modelStr,
+        standardModel,
+        requiredCapabilities,
+        clientRawRequest,
+        request,
+        apiKey,
+        settings,
+      });
+    }
+  }
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
@@ -161,9 +194,182 @@ export async function handleChat(request, clientRawRequest = null) {
 }
 
 /**
+ * Resolve a standard model to ordered provider/model candidates, then reuse
+ * the existing combo fallback engine for provider and account failover.
+ */
+async function handleStandardModelChat({ body, modelStr, standardModel, requiredCapabilities, clientRawRequest, request, apiKey, settings }) {
+  const bindings = await getStandardModelBindings(standardModel.id);
+  const requestFormat = request?.url
+    ? (detectFormatByEndpoint(new URL(request.url).pathname, body) || detectFormat(body))
+    : detectFormat(body);
+  const modelForPlanning = {
+    ...standardModel,
+    requiredCapabilities: Object.fromEntries([...requiredCapabilities].map((capability) => [capability, true])),
+  };
+  const policy = {
+    ...(settings.standardModelRouting?.defaultPolicy || {}),
+    ...(standardModel.policy || {}),
+  };
+  delete policy.selection;
+  const plan = planStandardModelCandidates({
+    model: modelForPlanning,
+    bindings,
+    requestFormat,
+    requireConfiguredProvider: true,
+  });
+
+  const previousResponseId = typeof body?.previous_response_id === "string"
+    ? body.previous_response_id.trim()
+    : "";
+  const responseAffinity = previousResponseId ? getStandardResponseAffinity(previousResponseId) : null;
+  if (previousResponseId && !responseAffinity) {
+    return buildStandardRouteErrorResponse({
+      status: 409,
+      message: `Cannot continue response ${previousResponseId}: its provider affinity is no longer available`,
+      publicModel: modelStr,
+      code: "response_affinity_unknown",
+      retryable: false,
+    });
+  }
+  if (responseAffinity && responseAffinity.standardModelId !== standardModel.id) {
+    return buildStandardRouteErrorResponse({
+      status: 409,
+      message: `Response ${previousResponseId} belongs to another standard model`,
+      publicModel: modelStr,
+      code: "response_affinity_model_mismatch",
+      retryable: false,
+    });
+  }
+  const affinityCandidate = responseAffinity
+    ? plan.candidates.find((candidate) => candidate.providerId === responseAffinity.providerId
+      && candidate.upstreamModelId === responseAffinity.upstreamModelId)
+    : null;
+  if (responseAffinity && !affinityCandidate) {
+    return buildStandardRouteErrorResponse({
+      status: 409,
+      message: `Provider affinity for response ${previousResponseId} is not configured for ${modelStr}`,
+      publicModel: modelStr,
+      code: "response_affinity_unavailable",
+      retryable: false,
+    });
+  }
+
+  if (plan.candidates.length === 0) {
+    const reason = plan.excluded[0]?.reason || "no_provider_mapping";
+    log.warn("ROUTER", `Standard model "${modelStr}" has no available provider (${reason})`);
+    return buildStandardRouteErrorResponse({
+      status: HTTP_STATUS.SERVICE_UNAVAILABLE,
+      message: `No available provider for standard model: ${modelStr}`,
+      publicModel: modelStr,
+      code: "no_provider_mapping",
+      retryable: false,
+      failures: plan.excluded.map((item) => ({ provider: item.providerId, category: item.reason, retryable: false })),
+    });
+  }
+
+  // Health is process-local by design in this phase. A cooled provider is
+  // excluded for this standard model/upstream mapping, while an all-cooled
+  // route still probes the configured candidates to avoid a hard outage.
+  const healthyCandidates = plan.candidates.filter((candidate) => {
+    const key = getStandardProviderHealthKey(standardModel.id, candidate.providerId, candidate.upstreamModelId);
+    return !getStandardProviderHealth(key);
+  });
+  const routableCandidates = affinityCandidate
+    ? [affinityCandidate]
+    : (healthyCandidates.length > 0 ? healthyCandidates : plan.candidates);
+  if (healthyCandidates.length !== plan.candidates.length) {
+    log.info("ROUTER", `Standard model "${modelStr}" skipped ${plan.candidates.length - healthyCandidates.length} provider health cooldown(s)`);
+  }
+
+  const maxAttempts = Number(policy.maxProviderAttempts);
+  const candidates = affinityCandidate || policy.fallbackStrategy === "none"
+    ? routableCandidates.slice(0, 1)
+    : Number.isFinite(maxAttempts) && maxAttempts > 0
+    ? routableCandidates.slice(0, Math.floor(maxAttempts))
+    : routableCandidates;
+  const providerModels = candidates.map((candidate) => `${candidate.providerId}/${candidate.upstreamModelId}`);
+  const maxGenerationAttempts = Number(policy.maxGenerationAttempts);
+  const routeBudget = createStandardRouteBudget({
+    maxAttempts: Number.isFinite(maxGenerationAttempts) && maxGenerationAttempts > 0
+      ? maxGenerationAttempts
+      : STANDARD_ROUTE_DEFAULTS.maxGenerationAttempts,
+    timeoutMs: Number(policy.maxRouteDurationMs || policy.timeoutMs) || STANDARD_ROUTE_DEFAULTS.maxRouteDurationMs,
+    signal: request?.signal,
+  });
+  const maxAccountAttemptsPerProvider = Number(policy.maxAccountAttemptsPerProvider);
+  const failures = [];
+
+  log.info("ROUTER", `Standard model "${modelStr}" → ${providerModels.join(", ")}`);
+  return handleComboChat({
+    body,
+    models: providerModels,
+    handleSingleModel: (b, m) => {
+      const candidate = candidates.find((item) => `${item.providerId}/${item.upstreamModelId}` === m);
+      return handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
+        attemptBudget: routeBudget,
+        maxAccountAttempts: maxAccountAttemptsPerProvider,
+        standardRoute: true,
+        standardModelId: standardModel.id,
+        responseAffinity: affinityCandidate ? { previousResponseId } : null,
+        preferredConnectionId: responseAffinity?.connectionId || null,
+        onResponseId: (responseId, metadata = {}) => recordStandardResponseAffinity(responseId, {
+          standardModelId: standardModel.id,
+          providerId: candidate?.providerId,
+          upstreamModelId: candidate?.upstreamModelId,
+          connectionId: metadata.connectionId,
+        }),
+      });
+    },
+    log,
+    comboName: `standard:${modelStr}`,
+    comboStrategy: "fallback",
+    autoSwitch: false,
+    attemptBudget: routeBudget,
+    abortSignal: request?.signal,
+    // A standard route already has another provider candidate; do not spend
+    // the legacy combo transient sleep before probing it.
+    failureClassifier: ({ status, errorText }) => {
+      const classification = classifyStandardRouteFailure({ status, error: errorText });
+      return {
+        ...classification,
+        shouldFallback: affinityCandidate ? false : classification.shouldFallback,
+        retryable: affinityCandidate ? false : classification.retryable,
+        cooldownMs: 0,
+      };
+    },
+    onAttemptResult: (attempt) => {
+      if (attempt.ok) {
+        const candidate = candidates.find((item) => `${item.providerId}/${item.upstreamModelId}` === attempt.model);
+        if (candidate) recordStandardProviderSuccess(getStandardProviderHealthKey(standardModel.id, candidate.providerId, candidate.upstreamModelId));
+        return;
+      }
+      const candidate = candidates.find((item) => `${item.providerId}/${item.upstreamModelId}` === attempt.model);
+      if (!candidate || attempt.shouldFallback === false || attempt.healthEligible === false) return;
+      const classification = classifyStandardRouteFailure({ status: attempt.status, error: attempt.errorText });
+      if (classification.healthEligible) {
+        recordStandardProviderFailure(
+          getStandardProviderHealthKey(standardModel.id, candidate.providerId, candidate.upstreamModelId),
+          { category: classification.category, status: attempt.status },
+        );
+      }
+      failures.push({ ...attempt, category: classification.category, retryable: classification.retryable });
+    },
+    onAllFailed: ({ status, message, budgetExhausted, budget }) => buildStandardRouteErrorResponse({
+      status,
+      message: budgetExhausted ? `Standard model route attempt budget exhausted: ${modelStr}` : message,
+      publicModel: modelStr,
+      code: budgetExhausted ? "attempt_budget_exhausted" : (affinityCandidate ? "response_affinity_failed" : "provider_unavailable"),
+      retryable: affinityCandidate ? false : true,
+      failures: failures.length > 0 ? failures : [],
+      budget,
+    }),
+  });
+}
+
+/**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, routeContext = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -229,9 +435,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
+  let accountAttempts = 0;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    if (routeContext?.attemptBudget && !routeContext.attemptBudget.canAttempt()) {
+      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
+    if (routeContext?.signal?.aborted || request?.signal?.aborted) {
+      return errorResponse(499, "Request aborted");
+    }
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      preferredConnectionId: routeContext?.preferredConnectionId || null,
+    });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -249,6 +464,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
+    if (routeContext?.preferredConnectionId
+      && (credentials.connectionId || credentials.id) !== routeContext.preferredConnectionId) {
+      return errorResponse(409, `Response affinity account is unavailable for provider: ${provider}`);
+    }
+
+    const maxAccountAttempts = Number(routeContext?.maxAccountAttempts);
+    if (Number.isFinite(maxAccountAttempts) && maxAccountAttempts > 0 && accountAttempts >= Math.floor(maxAccountAttempts)) {
+      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, `Account attempt budget exhausted for provider: ${provider}`);
+    }
+    if (routeContext?.attemptBudget && !routeContext.attemptBudget.consume({ provider, model, scope: "account" }).allowed) {
+      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
+    accountAttempts += 1;
+
     // Account selection shown in the unified "▶" line (acc:...)
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
 
@@ -265,11 +494,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    const effectiveRouteContext = routeContext
+      ? {
+        ...routeContext,
+        onResponseId: typeof routeContext.onResponseId === "function"
+          ? (responseId) => routeContext.onResponseId(responseId, { connectionId: credentials.connectionId || credentials.id })
+          : routeContext.onResponseId,
+      }
+      : null;
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
+      requestSignal: request?.signal,
       clientRawRequest,
       connectionId: credentials.connectionId,
       userAgent,
@@ -291,6 +529,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      routeContext: effectiveRouteContext,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {

@@ -61,8 +61,8 @@ function addToCounter(target, key, values) {
 }
 
 function aggregateEntryToDay(day, entry) {
-  const promptTokens = entry.tokens?.prompt_tokens || entry.tokens?.input_tokens || 0;
-  const completionTokens = entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
+  const promptTokens = entry.promptTokens || entry.tokens?.prompt_tokens || entry.tokens?.input_tokens || 0;
+  const completionTokens = entry.completionTokens || entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
   const cachedTokens = entry.tokens?.cached_tokens || entry.tokens?.cache_read_input_tokens || 0;
   const cost = entry.cost || 0;
   const vals = { promptTokens, completionTokens, cachedTokens, cost };
@@ -122,10 +122,11 @@ async function ensureRingInitialized() {
   recentRing.initialized = true;
   try {
     const db = await getAdapter();
-    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
+    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
     recentRing.items = rows.reverse().map((r) => ({
       timestamp: r.timestamp, provider: r.provider, model: r.model, connectionId: r.connectionId,
-      apiKey: r.apiKey, endpoint: r.endpoint, cost: r.cost, status: r.status,
+      apiKey: r.apiKey, endpoint: r.endpoint, promptTokens: r.promptTokens, completionTokens: r.completionTokens,
+      cost: r.cost, status: r.status,
       tokens: parseJson(r.tokens, {}),
     }));
   } catch {}
@@ -219,8 +220,8 @@ export async function getActiveRequests() {
       const t = e.tokens || {};
       return {
         timestamp: e.timestamp, model: e.model, provider: e.provider || "",
-        promptTokens: t.prompt_tokens || t.input_tokens || 0,
-        completionTokens: t.completion_tokens || t.output_tokens || 0,
+        promptTokens: e.promptTokens || t.prompt_tokens || t.input_tokens || 0,
+        completionTokens: e.completionTokens || t.completion_tokens || t.output_tokens || 0,
         status: e.status || "ok",
       };
     })
@@ -369,15 +370,15 @@ export async function getUsageStats(period = "all") {
   for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
-  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
+  const recentRows = db.all(`SELECT timestamp, provider, model, promptTokens, completionTokens, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
   const seen = new Set();
   const recentRequests = recentRows
     .map((r) => {
       const t = parseJson(r.tokens, {}) || {};
       return {
         timestamp: r.timestamp, model: r.model, provider: r.provider || "",
-        promptTokens: t.prompt_tokens || t.input_tokens || 0,
-        completionTokens: t.completion_tokens || t.output_tokens || 0,
+        promptTokens: r.promptTokens || t.prompt_tokens || t.input_tokens || 0,
+        completionTokens: r.completionTokens || t.completion_tokens || t.output_tokens || 0,
         cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
         status: r.status || "ok",
       };
@@ -580,8 +581,8 @@ export async function getUsageStats(period = "all") {
 
     for (const r of filtered) {
       const tokens = parseJson(r.tokens, {}) || {};
-      const promptTokens = tokens.prompt_tokens || 0;
-      const completionTokens = tokens.completion_tokens || 0;
+      const promptTokens = r.promptTokens || tokens.prompt_tokens || tokens.input_tokens || 0;
+      const completionTokens = r.completionTokens || tokens.completion_tokens || tokens.output_tokens || 0;
       const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
@@ -707,6 +708,20 @@ export async function getChartData(period = "7d") {
       buckets[idx].cost += r.cost || 0;
     }
     return buckets;
+  }
+
+  if (period === "all") {
+    const dayRows = loadDaysInRange(db, null)
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+    return dayRows.map((row) => {
+      const day = parseJson(row.data, {});
+      const date = new Date(`${row.dateKey}T00:00:00`);
+      return {
+        label: Number.isNaN(date.getTime()) ? row.dateKey : date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        tokens: (day.promptTokens || 0) + (day.completionTokens || 0),
+        cost: day.cost || 0,
+      };
+    });
   }
 
   const bucketCount = period === "7d" ? 7 : period === "30d" ? 30 : 60;

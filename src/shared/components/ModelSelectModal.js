@@ -8,6 +8,7 @@ import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { onLocaleChange, translate } from "@/i18n/runtime";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -19,6 +20,29 @@ const PROVIDER_ORDER = [
 
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
+
+function normalizeModelIdentity(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function preferredModelScore(model, preferredModelName) {
+  const canonical = normalizeModelIdentity(preferredModelName);
+  if (!canonical) return 0;
+  const values = [model?.id, model?.name]
+    .filter(Boolean)
+    .flatMap((value) => [
+      normalizeModelIdentity(value),
+      normalizeModelIdentity(String(value).split("/").pop()),
+    ]);
+  if (values.includes(canonical)) return 100;
+  if (values.some((value) => value.endsWith(`-${canonical}`))) return 90;
+  if (values.some((value) => value.startsWith(`${canonical}-`))) return 80;
+  return 0;
+}
 
 export default function ModelSelectModal({
   isOpen,
@@ -33,7 +57,21 @@ export default function ModelSelectModal({
   capFilter = null,
   addedModelValues = [],
   closeOnSelect = true,
+  providerOnly = false,
+  preferredModelName = "",
+  multiSelect = false,
+  selectedModelValues = [],
+  onConfirm,
+  confirming = false,
+  confirmLabel = "Confirm Add",
+  allowEmptySelection = false,
+  extraModels = [],
+  excludedProviderIds = [],
 }) {
+  const [, refreshLocale] = useState(0);
+
+  useEffect(() => onLocaleChange(() => refreshLocale((value) => value + 1)), [refreshLocale]);
+
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
     if (!kindFilter) return activeProviders;
@@ -49,48 +87,6 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  const [cursorModels, setCursorModels] = useState([]);
-
-  // Cursor exposes the usable catalog per account. Keep the static catalog only
-  // as a fallback, since it quickly becomes stale and different accounts can
-  // have different model entitlements.
-  const cursorConnectionIds = useMemo(
-    () => activeProviders
-      .filter((provider) => provider.provider === "cursor" && provider.id)
-      .map((provider) => provider.id),
-    [activeProviders],
-  );
-
-  useEffect(() => {
-    if (!isOpen || cursorConnectionIds.length === 0) {
-      setCursorModels([]);
-      return undefined;
-    }
-
-    let cancelled = false;
-    Promise.all(cursorConnectionIds.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
-    }))
-      .then((modelLists) => {
-        if (cancelled) return;
-        const seen = new Set();
-        setCursorModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn("Unable to load Cursor models for selector:", error);
-        if (!cancelled) setCursorModels([]);
-      });
-
-    return () => { cancelled = true; };
-  }, [isOpen, cursorConnectionIds]);
 
   const fetchCombos = async () => {
     try {
@@ -157,6 +153,25 @@ export default function ModelSelectModal({
   }, [isOpen]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
+
+  // Use the models already stored with a provider connection when the provider
+  // has an explicit local model selection. This keeps the selector offline and
+  // avoids probing provider `/models` endpoints just to open the modal.
+  const localModelsByProvider = useMemo(() => {
+    const grouped = {};
+    for (const connection of filteredActiveProviders) {
+      const configured = connection?.providerSpecificData?.enabledModels;
+      if (!Array.isArray(configured) || configured.length === 0) continue;
+      const list = grouped[connection.provider] || [];
+      for (const rawModel of configured) {
+        const id = String(rawModel?.id || rawModel?.model || rawModel?.name || rawModel || "").trim();
+        if (!id || list.some((model) => model.id === id)) continue;
+        list.push({ id, name: String(rawModel?.name || rawModel?.displayName || id) });
+      }
+      grouped[connection.provider] = list;
+    }
+    return grouped;
+  }, [filteredActiveProviders]);
 
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
@@ -284,6 +299,12 @@ export default function ModelSelectModal({
 
         // Aliases are stored using the raw providerId as key (e.g. "openai-compatible-chat-<uuid>/glm-4.7"),
         // so we must filter by providerId, not by the display prefix.
+        const configuredModels = (localModelsByProvider[providerId] || []).map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          value: `${nodePrefix}/${model.id}`,
+          isCustom: true,
+        }));
         const nodeModels = Object.entries(modelAliases)
           .filter(([, fullModel]) => fullModel.startsWith(`${providerId}/`))
           .map(([aliasName, fullModel]) => ({
@@ -302,8 +323,12 @@ export default function ModelSelectModal({
             value: `${nodePrefix}/${m.id}`,
             isCustom: true,
           }));
-        const seen = new Set(nodeModels.map((m) => m.value));
-        const mergedModels = [...nodeModels, ...registeredCustom.filter((m) => !seen.has(m.value))];
+        const seen = new Set(configuredModels.map((m) => m.value));
+        const mergedModels = [
+          ...configuredModels,
+          ...nodeModels.filter((m) => !seen.has(m.value)),
+          ...registeredCustom.filter((m) => !seen.has(m.value)),
+        ];
 
         // Always show compatible providers that are connected, even with no aliases.
         // When no aliases exist, show a placeholder so users know it's available.
@@ -323,8 +348,8 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const hardcodedModels = providerId === "cursor" && cursorModels.length > 0
-          ? cursorModels
+        const hardcodedModels = localModelsByProvider[providerId]?.length > 0
+          ? localModelsByProvider[providerId]
           : getModelsByProviderId(providerId);
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
@@ -381,6 +406,37 @@ export default function ModelSelectModal({
       }
     });
 
+    // Keep already configured cards visible even when a provider's local
+    // catalog no longer contains that upstream model. This lets users remove
+    // stale/manual cards from the same Combo-style picker.
+    for (const model of extraModels) {
+      const providerId = String(model?.providerId || "").trim();
+      const id = String(model?.id || "").trim();
+      if (!providerId || !id) continue;
+      const providerInfo = allProviders[providerId] || { name: providerId, color: "#666" };
+      const alias = getProviderAlias(providerId);
+      const value = model.value || `${alias}/${id}`;
+      const existingGroup = groups[providerId];
+      const extra = {
+        id,
+        name: model.name || id,
+        value,
+        isCustom: true,
+      };
+      if (existingGroup) {
+        if (!existingGroup.models.some((item) => item.value === value)) existingGroup.models.push(extra);
+      } else {
+        groups[providerId] = {
+          name: providerInfo.name || providerId,
+          alias,
+          color: providerInfo.color,
+          models: [extra],
+          isCustom: true,
+          hasModels: true,
+        };
+      }
+    }
+
     // Filter out disabled models per provider (disabled keyed by storage alias OR providerId)
     Object.entries(groups).forEach(([providerId, group]) => {
       const aliasKey = getProviderAlias(providerId);
@@ -394,20 +450,22 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, localModelsByProvider, extraModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
-    if (kindFilter || capFilter) return [];
+    if (kindFilter || capFilter || providerOnly) return [];
     if (!searchQuery.trim()) return combos;
     const query = searchQuery.toLowerCase();
     return combos.filter(c => c.name.toLowerCase().includes(query));
-  }, [combos, searchQuery, kindFilter]);
+  }, [combos, searchQuery, kindFilter, capFilter, providerOnly]);
 
   // Sort models alphabetically, with added models floated to top
   const sortModels = (models) => {
-    const added = models.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
-    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const byPriority = (a, b) => preferredModelScore(b, preferredModelName) - preferredModelScore(a, preferredModelName)
+      || a.name.localeCompare(b.name);
+    const added = models.filter(m => addedModelValues.includes(m.value)).sort(byPriority);
+    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort(byPriority);
     return [...added, ...rest];
   };
 
@@ -417,6 +475,7 @@ export default function ModelSelectModal({
 
     const filtered = {};
     Object.entries(groupedModels).forEach(([providerId, group]) => {
+      if (excludedProviderIds.includes(providerId)) return;
       let models = group.models;
       // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
       if (capFilter) {
@@ -439,10 +498,14 @@ export default function ModelSelectModal({
     });
 
     return filtered;
-  }, [groupedModels, searchQuery, addedModelValues]);
+  }, [groupedModels, searchQuery, addedModelValues, capFilter, preferredModelName, excludedProviderIds]);
 
   const handleSelect = (model) => {
     const value = model?.value || model?.name || model;
+    if (multiSelect) {
+      onSelect(model);
+      return;
+    }
     const isAdded = addedModelValues.includes(value);
 
     if (isAdded && onDeselect) {
@@ -464,17 +527,24 @@ export default function ModelSelectModal({
         onClose();
         setSearchQuery("");
       }}
-      title={title}
+      title={translate(title)}
       size="md"
       className="p-4!"
-      footer={null}
+      footer={multiSelect ? (
+        <>
+          <span className="mr-auto text-xs text-text-muted">{translate("Selected")} {selectedModelValues.length} {translate("models")}</span>
+          <button type="button" className="rounded-lg border border-border px-3 py-2 text-sm text-text-main hover:bg-sidebar" onClick={onClose} disabled={confirming}>{translate("Cancel")}</button>
+          <button type="button" className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" onClick={onConfirm} disabled={confirming || (!allowEmptySelection && selectedModelValues.length === 0)}>
+            {confirming ? translate("Adding...") : translate(confirmLabel)}
+          </button>
+        </>
+      ) : null}
     >
       {/* Info bar */}
       <div className="flex items-center gap-2 mb-3 px-2.5 py-2 bg-primary/8 border border-primary/20 rounded-lg text-xs text-text-muted">
         <span className="material-symbols-outlined text-primary shrink-0" style={{ fontSize: "14px" }}>info</span>
-        <span>Click to add, click again to remove. Changes are saved automatically.</span>
+        <span>{translate(multiSelect ? "Select or deselect models, then confirm to save." : "Click to add, click again to remove. Changes are saved automatically.")}</span>
       </div>
-
       {/* Search - compact */}
       <div className="mb-3">
         <div className="relative">
@@ -483,7 +553,7 @@ export default function ModelSelectModal({
           </span>
           <input
             type="text"
-            placeholder="Search..."
+            placeholder={translate("Search...")}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 bg-surface border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
@@ -498,7 +568,7 @@ export default function ModelSelectModal({
           <div>
             <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5">
               <span className="material-symbols-outlined text-primary text-[14px]">layers</span>
-              <span className="text-xs font-medium text-primary">Combos</span>
+              <span className="text-xs font-medium text-primary">{translate("Combos")}</span>
               <span className="text-[10px] text-text-muted">({filteredCombos.length})</span>
             </div>
             <div className="flex flex-wrap gap-1.5">
@@ -507,7 +577,7 @@ export default function ModelSelectModal({
                 return (
                   <button
                     key={combo.id}
-                    onClick={() => handleSelect({ id: combo.name, name: combo.name, value: combo.name })}
+                    onClick={() => handleSelect({ id: combo.name, name: combo.name, value: combo.name, providerId: null })}
                     className={`
                       px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer flex items-center gap-1
                       ${isSelected
@@ -551,27 +621,30 @@ export default function ModelSelectModal({
 
             <div className="flex flex-wrap gap-1.5">
               {group.models.map((model) => {
-                const isSelected = selectedModel === model.value;
+                const isSelected = selectedModel === model.value || selectedModelValues.includes(model.value);
+                const isAdded = addedModelValues.includes(model.value);
+                const isMarked = multiSelect ? isSelected : isAdded;
                 const isPlaceholder = model.isPlaceholder;
+                const isPreferred = preferredModelScore(model, preferredModelName) >= 90;
                 return (
                   <button
                     key={model.value}
-                    onClick={() => handleSelect(model)}
-                    title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
+                    onClick={() => handleSelect({ ...model, providerId })}
+                      title={isPlaceholder ? translate("Select to pre-fill, then edit model ID in the input") : undefined}
                     className={`
                       px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
                       ${isPlaceholder
                         ? "border-dashed border-border text-text-muted hover:border-primary/50 hover:text-primary bg-surface italic"
                         : isSelected
                           ? "bg-primary text-white border-primary"
-                          : addedModelValues.includes(model.value)
+                        : isMarked
                             ? "bg-primary border-primary text-white hover:bg-primary-hover"
                             : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
                       }
                     `}
                   >
                     <span className="flex items-center gap-1">
-                      {addedModelValues.includes(model.value) && !isPlaceholder && (
+                      {isMarked && !isPlaceholder && (
                         <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
                       )}
                       {isPlaceholder ? (
@@ -582,12 +655,14 @@ export default function ModelSelectModal({
                       ) : model.isCustom ? (
                         <>
                           {model.name}
-                          <span className="text-[9px] opacity-60 font-normal">custom</span>
+                          <span className="text-[9px] opacity-60 font-normal">{translate("custom")}</span>
+                          {isPreferred && <span className="text-[9px] text-green-600">{translate("matched")}</span>}
                           <CapacityBadges caps={getCaps(model.value)} />
                         </>
                       ) : (
                         <>
                           {model.name}
+                          {isPreferred && <span className="text-[9px] text-green-600">{translate("matched")}</span>}
                           <CapacityBadges caps={getCaps(model.value)} />
                         </>
                       )}
@@ -604,7 +679,7 @@ export default function ModelSelectModal({
             <span className="material-symbols-outlined text-2xl mb-1 block">
               search_off
             </span>
-            <p className="text-xs">No models found</p>
+            <p className="text-xs">{translate("No models found")}</p>
           </div>
         )}
       </div>
@@ -628,4 +703,19 @@ ModelSelectModal.propTypes = {
   kindFilter: PropTypes.string,
   addedModelValues: PropTypes.arrayOf(PropTypes.string),
   closeOnSelect: PropTypes.bool,
+  providerOnly: PropTypes.bool,
+  preferredModelName: PropTypes.string,
+  multiSelect: PropTypes.bool,
+  selectedModelValues: PropTypes.arrayOf(PropTypes.string),
+  onConfirm: PropTypes.func,
+  confirming: PropTypes.bool,
+  confirmLabel: PropTypes.string,
+  allowEmptySelection: PropTypes.bool,
+  extraModels: PropTypes.arrayOf(PropTypes.shape({
+    providerId: PropTypes.string,
+    id: PropTypes.string,
+    name: PropTypes.string,
+    value: PropTypes.string,
+  })),
+  excludedProviderIds: PropTypes.arrayOf(PropTypes.string),
 };

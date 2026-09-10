@@ -84,6 +84,13 @@ const getPageInfo = (pathname) => {
       icon: "layers",
       breadcrumbs: [],
     };
+  if (pathname.includes("/standard-models"))
+    return {
+      title: "Standard Models",
+      description: "Manage canonical model identities and provider mappings",
+      icon: "hub",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/usage"))
     return {
       title: "Usage & Analytics",

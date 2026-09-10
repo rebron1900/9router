@@ -15,11 +15,19 @@ function getTimeString() {
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "" } = {}) {
+export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", externalSignal = null } = {}) {
   const abortController = new AbortController();
   const startTime = Date.now();
   let disconnected = false;
   let abortTimeout = null;
+
+  const onExternalAbort = () => abortController.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortController.abort(externalSignal.reason);
+  else externalSignal?.addEventListener?.("abort", onExternalAbort, { once: true });
+
+  const cleanupExternalSignal = () => {
+    externalSignal?.removeEventListener?.("abort", onExternalAbort);
+  };
 
   // Only abnormal terminations are logged; normal completion is covered by "📊 done".
   // isError uses errorLine (always shown, ignores LOG_LEVEL) so failures survive quiet levels.
@@ -40,6 +48,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
     handleDisconnect: (reason = "client_closed") => {
       if (disconnected) return;
       disconnected = true;
+      cleanupExternalSignal();
 
       // Debug-only: Responses API has no [DONE] sentinel, so codex/droid close the
       // socket on every completed request. "📊 done" is the authoritative outcome line.
@@ -57,6 +66,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
     handleComplete: () => {
       if (disconnected) return;
       disconnected = true;
+      cleanupExternalSignal();
 
       if (abortTimeout) {
         clearTimeout(abortTimeout);
@@ -68,6 +78,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
     handleError: (error) => {
       if (disconnected) return;
       disconnected = true;
+      cleanupExternalSignal();
 
       if (abortTimeout) {
         clearTimeout(abortTimeout);
@@ -83,7 +94,10 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
       onError?.(error);
     },
 
-    abort: () => abortController.abort()
+    abort: () => {
+      cleanupExternalSignal();
+      abortController.abort();
+    }
   };
 }
 
@@ -189,7 +203,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
  * @param {TransformStream} transformStream - Transform stream for SSE
  * @param {object} streamController - Stream controller from createStreamController
  */
-export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS) {
+export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, onChunk = null, onOutputChunk = null) {
   let stallTimer = null;
   let chunkCount = 0;
   let totalBytes = 0;
@@ -227,6 +241,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
 
   const upstreamTap = new TransformStream({
     transform(chunk, controller) {
+      try { onChunk?.(chunk); } catch { /* telemetry must not break the stream */ }
       chunkCount++;
       const sz = chunk?.byteLength || chunk?.length || 0;
       totalBytes += sz;
@@ -241,10 +256,17 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     },
     flush() { dbg(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); }
   });
+  const outputTap = new TransformStream({
+    transform(chunk, controller) {
+      try { onOutputChunk?.(chunk); } catch { /* telemetry must not break the stream */ }
+      controller.enqueue(chunk);
+    },
+  });
 
   const transformedBody = providerResponse.body
     .pipeThrough(upstreamTap)
-    .pipeThrough(transformStream);
+    .pipeThrough(transformStream)
+    .pipeThrough(outputTap);
 
   return createDisconnectAwareStream(
     { readable: transformedBody, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },

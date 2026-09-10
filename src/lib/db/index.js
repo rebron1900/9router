@@ -38,6 +38,16 @@ export {
   createCombo, updateCombo, deleteCombo,
 } from "./repos/combosRepo.js";
 
+// Standard model routing
+export {
+  getStandardModels, getStandardModelById, getStandardModelByName,
+  createStandardModel, updateStandardModel, deleteStandardModel,
+  reorderStandardModels,
+  getStandardModelBindings, createStandardModelBinding,
+  updateStandardModelBinding, deleteStandardModelBinding,
+  replaceStandardModelMappings,
+} from "./repos/standardModelsRepo.js";
+
 // Aliases (model + custom + mitm)
 export {
   getModelAliases, setModelAlias, deleteModelAlias,
@@ -79,6 +89,45 @@ export async function exportDb() {
     proxyPools: db.all(`SELECT * FROM proxyPools`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, isActive: r.isActive === 1, testStatus: r.testStatus, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     apiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ id: r.id, key: r.key, name: r.name, machineId: r.machineId, isActive: r.isActive === 1, createdAt: r.createdAt })),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
+    standardModels: db.all(`SELECT * FROM standardModels`).map((r) => ({
+      id: r.id,
+      publicName: r.publicName,
+      publisher: r.publisher,
+      officialModelId: r.officialModelId,
+      displayName: r.displayName,
+      lifecycle: r.lifecycle,
+      enabled: r.enabled === 1,
+      capabilities: parseJson(r.capabilities, {}),
+      limits: parseJson(r.limits, {}),
+      policy: parseJson(r.policy, {}),
+      sourceUrl: r.sourceUrl,
+      verifiedAt: r.verifiedAt,
+      catalogVersion: r.catalogVersion,
+      revision: r.revision,
+      sortOrder: r.sortOrder,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      providers: db.all(`SELECT * FROM standardModelProviders WHERE standardModelId = ?`, [r.id]).map((p) => ({
+        id: p.id,
+        providerId: p.providerId,
+        enabled: p.enabled === 1,
+        priority: p.priority,
+        data: parseJson(p.data, {}),
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+        mappings: db.all(`SELECT * FROM standardModelMappings WHERE providerBindingId = ?`, [p.id]).map((m) => ({
+          id: m.id,
+          upstreamModelId: m.upstreamModelId,
+          enabled: m.enabled === 1,
+          mappingPriority: m.mappingPriority,
+          requestFormats: parseJson(m.requestFormats, []),
+          operations: parseJson(m.operations, []),
+          capabilityOverrides: parseJson(m.capabilityOverrides, {}),
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+        })),
+      })),
+    })),
     modelAliases: {},
     customModels: [],
     mitmAlias: {},
@@ -107,6 +156,9 @@ export async function importDb(payload) {
     db.run(`DELETE FROM proxyPools`);
     db.run(`DELETE FROM apiKeys`);
     db.run(`DELETE FROM combos`);
+    db.run(`DELETE FROM standardModelMappings`);
+    db.run(`DELETE FROM standardModelProviders`);
+    db.run(`DELETE FROM standardModels`);
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
 
     // Settings
@@ -146,6 +198,41 @@ export async function importDb(payload) {
         `INSERT OR REPLACE INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
         [c.id, c.name, c.kind || null, stringifyJson(c.models || []), c.createdAt || new Date().toISOString(), c.updatedAt || new Date().toISOString()]
       );
+    }
+    for (const model of payload.standardModels || []) {
+      db.run(
+        `INSERT OR REPLACE INTO standardModels
+          (id, publicName, publisher, officialModelId, displayName, lifecycle, enabled,
+           capabilities, limits, policy, sourceUrl, verifiedAt, catalogVersion, revision, sortOrder,
+           createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [model.id, model.publicName, model.publisher || null, model.officialModelId || model.publicName,
+          model.displayName || model.publicName, model.lifecycle || "active", model.enabled === false ? 0 : 1,
+          stringifyJson(model.capabilities || {}), stringifyJson(model.limits || {}), stringifyJson(model.policy || {}),
+          model.sourceUrl || null, model.verifiedAt || null, model.catalogVersion || null, model.revision || 1, model.sortOrder || 0,
+          model.createdAt || new Date().toISOString(), model.updatedAt || new Date().toISOString()],
+      );
+      for (const provider of model.providers || []) {
+        db.run(
+          `INSERT OR REPLACE INTO standardModelProviders
+            (id, standardModelId, providerId, enabled, priority, weight, data, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [provider.id, model.id, provider.providerId, provider.enabled === false ? 0 : 1,
+            Math.max(1, Number(provider.priority) || 1), 100,
+            stringifyJson(provider.data || {}), provider.createdAt || new Date().toISOString(), provider.updatedAt || new Date().toISOString()],
+        );
+        for (const mapping of provider.mappings || []) {
+          db.run(
+            `INSERT OR REPLACE INTO standardModelMappings
+              (id, providerBindingId, upstreamModelId, enabled, mappingPriority, requestFormats, operations, capabilityOverrides, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [mapping.id, provider.id, mapping.upstreamModelId, mapping.enabled === false ? 0 : 1,
+              Math.max(1, Number(mapping.mappingPriority) || 1), stringifyJson(mapping.requestFormats || []),
+              stringifyJson(mapping.operations || []), stringifyJson(mapping.capabilityOverrides || {}),
+              mapping.createdAt || new Date().toISOString(), mapping.updatedAt || new Date().toISOString()],
+          );
+        }
+      }
     }
     for (const [a, m] of Object.entries(payload.modelAliases || {})) {
       db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('modelAliases', ?, ?)`, [a, stringifyJson(m)]);

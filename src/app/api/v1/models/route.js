@@ -5,7 +5,7 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
@@ -292,6 +292,19 @@ export async function buildModelsList(kindFilter, options = {}) {
 
   const models = [];
 
+  // When unified routing is enabled, advertise registered standard names in
+  // addition to the existing provider-prefixed catalog. Provider-prefixed
+  // entries remain available by default for backwards compatibility.
+  let standardModels = [];
+  try {
+    const settings = await getSettings();
+    if (settings.standardModelRouting?.enabled === true && settings.standardModelRouting?.modelListMode !== "provider-only") {
+      standardModels = await getStandardModels({ includeDisabled: false });
+    }
+  } catch (error) {
+    console.log("Could not fetch standard models", error);
+  }
+
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
     if (!comboMatchesKinds(combo, kindFilter)) continue;
@@ -528,6 +541,27 @@ export async function buildModelsList(kindFilter, options = {}) {
         });
       }
     }
+  }
+
+  for (const standardModel of standardModels) {
+    if (!standardModel?.publicName || standardModel.enabledProviderCount < 1) continue;
+    const entry = {
+      id: standardModel.publicName,
+      object: "model",
+      owned_by: standardModel.publisher || "9router",
+      standard_model: true,
+      root: standardModel.officialModelId,
+    };
+    if (standardModel.capabilities && typeof standardModel.capabilities === "object") {
+      entry.capabilities = standardModel.capabilities;
+    }
+    if (Number.isFinite(Number(standardModel.limits?.contextWindow))) {
+      entry.context_length = Number(standardModel.limits.contextWindow);
+    }
+    if (Number.isFinite(Number(standardModel.limits?.maxOutput))) {
+      entry.max_completion_tokens = Number(standardModel.limits.maxOutput);
+    }
+    models.push(entry);
   }
 
   const dedupedModels = [];

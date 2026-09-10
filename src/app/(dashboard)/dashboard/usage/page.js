@@ -11,6 +11,7 @@ const PERIODS = [
   { value: "7d", label: "7D" },
   { value: "30d", label: "30D" },
   { value: "60d", label: "60D" },
+  { value: "all", label: "All" },
 ];
 
 export default function UsagePage() {
@@ -46,6 +47,7 @@ function UsageContent() {
         <SegmentedControl
           options={[
             { value: "overview", label: "Overview" },
+            { value: "logs", label: "Request Logs" },
             { value: "details", label: "Details" },
           ]}
           value={activeTab}
