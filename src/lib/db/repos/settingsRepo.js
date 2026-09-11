@@ -1,5 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { setDebugEnabled } from "open-sse/utils/debugLog.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS = {
     audioInput: { enabled: true, roundRobin: false, models: [] },
     videoInput: { enabled: false, roundRobin: false, models: [] },
   },
+  debugLogs: false,
   requireLogin: true,
   requireApiKey: true,
   tunnelDashboardAccess: true,
@@ -101,7 +103,10 @@ export function mergeWithDefaults(raw) {
 
 export async function getSettings() {
   const raw = await readRaw();
-  return mergeWithDefaults(raw);
+  const merged = mergeWithDefaults(raw);
+  // Keep the in-memory debug flag in sync with the persisted setting (no extra IO).
+  setDebugEnabled(merged.debugLogs === true);
+  return merged;
 }
 
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
@@ -117,7 +122,10 @@ export async function updateSettings(updates) {
       [stringifyJson(next)],
     );
   });
-  return mergeWithDefaults(next);
+  const merged = mergeWithDefaults(next);
+  // Apply immediately so a UI toggle takes effect without a restart.
+  setDebugEnabled(merged.debugLogs === true);
+  return merged;
 }
 
 export async function isCloudEnabled() {

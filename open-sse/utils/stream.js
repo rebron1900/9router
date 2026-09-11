@@ -118,7 +118,7 @@ export function createSSEStream(options = {}) {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (isDebugEnabled && trimmed) {
+        if (isDebugEnabled() && trimmed) {
           sseLineCount++;
           if (trimmed.startsWith("event:")) {
             const evt = trimmed.slice(6).trim();
