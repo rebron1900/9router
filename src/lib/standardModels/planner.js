@@ -77,6 +77,21 @@ export function planStandardModelCandidates({
         mappingPriority: Math.max(1, Number(mapping.mappingPriority) || 1),
         configured: !!binding.configured,
         connectionCount: Number(binding.connectionCount) || 0,
+        // Keep mapping-level capability declarations attached to this
+        // candidate. The execution layer uses them as request-scoped
+        // overrides; they must not be stored in global provider state because
+        // standard models can point at the same upstream with different
+        // contracts.
+        capabilityOverrides: mapping.capabilityOverrides || {},
+        // The standard model's own identity + declared capabilities. The
+        // execution layer feeds these into the shared capability resolver so
+        // the runtime sees the same catalog/DB layers as /v1/models, instead of
+        // resolving the upstream model purely from the static provider table.
+        publicName: model?.publicName || null,
+        standardModelCapabilities:
+          model?.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
+            ? model.capabilities
+            : null,
       });
     }
   }

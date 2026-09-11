@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { getCapabilitiesForModel, mergeCapabilities } from "../../open-sse/providers/capabilities.js";
 
 describe("getCapabilitiesForModel", () => {
   const claudeSonnet5Expected = {
@@ -72,5 +72,19 @@ describe("getCapabilitiesForModel", () => {
       contextWindow: 272000,
       maxOutput: 128000,
     });
+  });
+});
+
+describe("mergeCapabilities", () => {
+  it("merges thinkingRange field by field instead of replacing it", () => {
+    const base = { thinkingFormat: "gemini-budget", thinkingRange: { min: 0, max: 24576 } };
+    const merged = mergeCapabilities(base, { thinkingRange: { min: 5 } });
+    expect(merged.thinkingRange).toEqual({ min: 5, max: 24576 });
+  });
+
+  it("lets a later override set both bounds", () => {
+    const base = { thinkingRange: { min: 0, max: 24576 } };
+    const merged = mergeCapabilities(base, { thinkingRange: { min: 1, max: 10 } });
+    expect(merged.thinkingRange).toEqual({ min: 1, max: 10 });
   });
 });

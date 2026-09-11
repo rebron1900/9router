@@ -63,6 +63,75 @@ export const DEFAULT_CAPABILITIES = {
   maxOutput: 64000,
 };
 
+// Capability overrides are request-scoped metadata supplied by the local
+// model registry (for example, a user marking a custom upstream model as
+// vision-capable). Keep this allowlist deliberately separate from the static
+// provider tables: callers may merge an override for one request without
+// mutating global capability state or changing the default behavior of any
+// other model.
+const THINKING_FORMATS = new Set([
+  "openai", "claude-adaptive", "claude-budget", "gemini-level", "gemini-budget",
+  "zai", "qwen", "deepseek", "kimi", "minimax", "hunyuan", "step", "kiro",
+]);
+const BOOLEAN_CAPABILITY_KEYS = Object.keys(DEFAULT_CAPABILITIES)
+  .filter((key) => typeof DEFAULT_CAPABILITIES[key] === "boolean");
+
+/**
+ * Keep only capability fields understood by the runtime.
+ *
+ * Persisted model metadata is user-editable, so it must never be spread
+ * blindly into the runtime capability object. Unknown keys and malformed
+ * values are ignored; omitted keys remain governed by the static resolver.
+ */
+export function normalizeCapabilityOverrides(overrides) {
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return {};
+
+  const clean = {};
+  for (const key of BOOLEAN_CAPABILITY_KEYS) {
+    if (typeof overrides[key] === "boolean") clean[key] = overrides[key];
+  }
+
+  if (typeof overrides.thinkingFormat === "string" && THINKING_FORMATS.has(overrides.thinkingFormat)) {
+    clean.thinkingFormat = overrides.thinkingFormat;
+  }
+  if (overrides.thinkingRange && typeof overrides.thinkingRange === "object" && !Array.isArray(overrides.thinkingRange)) {
+    const range = {};
+    for (const key of ["min", "max"]) {
+      if (Number.isFinite(Number(overrides.thinkingRange[key])) && Number(overrides.thinkingRange[key]) >= 0) {
+        range[key] = Number(overrides.thinkingRange[key]);
+      }
+    }
+    if (Object.keys(range).length > 0) clean.thinkingRange = range;
+  }
+
+  for (const key of ["contextWindow", "maxOutput"]) {
+    if (Number.isFinite(Number(overrides[key])) && Number(overrides[key]) > 0) {
+      clean[key] = Number(overrides[key]);
+    }
+  }
+
+  return clean;
+}
+
+/**
+ * Merge one or more request-scoped overrides over a static capability result.
+ * The function is pure and preserves the historical static result when no
+ * valid override is supplied.
+ *
+ * `thinkingRange` is a nested { min, max } object, so a plain Object.assign
+ * would replace it wholesale: a base of { min: 0, max: 24576 } plus an override
+ * of { min: 5 } would drop `max`. Merge it field by field instead.
+ */
+export function mergeCapabilities(base, ...overrides) {
+  const result = { ...DEFAULT_CAPABILITIES, ...(base || {}) };
+  for (const override of overrides) {
+    const { thinkingRange, ...rest } = normalizeCapabilityOverrides(override);
+    Object.assign(result, rest);
+    if (thinkingRange) result.thinkingRange = { ...(result.thinkingRange || {}), ...thinkingRange };
+  }
+  return result;
+}
+
 // User-added model metadata can carry dashboard service kinds instead of the
 // runtime capability names used here. Map those typed model kinds into input /
 // output capabilities so custom vision models are not treated as text-only.

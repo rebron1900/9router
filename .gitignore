@@ -55,6 +55,7 @@ source/*
 docs/*
 !docs/ARCHITECTURE.md
 !docs/STANDARD-MODEL-ROUTING.md
+!docs/MODEL-CAPABILITY-RUNTIME.md
 test/*
 open-sse/test/*
 RM.vn.md
@@ -93,3 +94,4 @@ graphify-out/*
 
 # Kiro local workspace state
 .kiro/
+.alma-snapshots

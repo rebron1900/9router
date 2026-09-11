@@ -9,6 +9,7 @@ import {
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings, getStandardModelByName, getStandardModelBindings } from "@/lib/localDb";
+import { createCapabilityResolver, loadCustomModelCapabilityOverrides, resolveCapabilities } from "@/lib/modelCapabilities";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -21,6 +22,7 @@ import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import { detectFormat } from "open-sse/services/provider.js";
+import { getCapabilitiesForModel, mergeCapabilities } from "open-sse/providers/capabilities.js";
 import { planStandardModelCandidates } from "@/lib/standardModels/planner";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
@@ -82,6 +84,11 @@ export async function handleChat(request, clientRawRequest = null) {
 
   // Enforce API key if enabled in settings
   const settings = await getSettings();
+  // Load user-defined model capabilities once for this request. The resolver
+  // is synchronous after this point, so every combo/fallback candidate sees
+  // the same snapshot without introducing DB reads into open-sse's hot path.
+  const customCapabilityOverrides = await loadCustomModelCapabilityOverrides();
+  const capabilityResolver = createCapabilityResolver(customCapabilityOverrides);
   if (settings.requireApiKey) {
     if (!apiKey) {
       log.warn("AUTH", "Missing API key (requireApiKey=true)");
@@ -121,6 +128,7 @@ export async function handleChat(request, clientRawRequest = null) {
         request,
         apiKey,
         settings,
+        capabilityResolver,
       });
     }
   }
@@ -132,7 +140,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
+    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings, capabilityResolver);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
     if (comboStrategy === "fusion") {
@@ -146,7 +154,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, null, capabilityResolver);
         },
         log,
         comboName: modelStr,
@@ -161,19 +169,21 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-        adapterAdded
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, capabilityResolver),
+        adapterAdded,
+        capabilityResolver
       ),
       log,
       comboName: modelStr,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      capabilityResolver
     });
   }
 
   // Single model request — may still switch to a capacity-adapter model if the
   // target lacks a capability the request needs (e.g. no vision, request has an image).
-  const soloAugmented = augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings);
+  const soloAugmented = augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings, capabilityResolver);
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
@@ -181,23 +191,25 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-        adapterAdded
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, capabilityResolver),
+        adapterAdded,
+        capabilityResolver
       ),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+      capabilityResolver
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, null, capabilityResolver);
 }
 
 /**
  * Resolve a standard model to ordered provider/model candidates, then reuse
  * the existing combo fallback engine for provider and account failover.
  */
-async function handleStandardModelChat({ body, modelStr, standardModel, requiredCapabilities, clientRawRequest, request, apiKey, settings }) {
+async function handleStandardModelChat({ body, modelStr, standardModel, requiredCapabilities, clientRawRequest, request, apiKey, settings, capabilityResolver }) {
   const bindings = await getStandardModelBindings(standardModel.id);
   const requestFormat = request?.url
     ? (detectFormatByEndpoint(new URL(request.url).pathname, body) || detectFormat(body))
@@ -312,18 +324,25 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
         standardModelId: standardModel.id,
         responseAffinity: affinityCandidate ? { previousResponseId } : null,
         preferredConnectionId: responseAffinity?.connectionId || null,
+        // Feed the standard model identity + declared capabilities into the
+        // shared resolver so the runtime applies the same bundled-catalog and
+        // local-DB layers as /v1/models.
+        standardModelPublicName: candidate?.publicName || standardModel.publicName || null,
+        standardModelCapabilities: candidate?.standardModelCapabilities || null,
+        capabilityOverrides: candidate?.capabilityOverrides || null,
         onResponseId: (responseId, metadata = {}) => recordStandardResponseAffinity(responseId, {
           standardModelId: standardModel.id,
           providerId: candidate?.providerId,
           upstreamModelId: candidate?.upstreamModelId,
           connectionId: metadata.connectionId,
         }),
-      });
+      }, capabilityResolver);
     },
     log,
     comboName: `standard:${modelStr}`,
     comboStrategy: "fallback",
     autoSwitch: false,
+    capabilityResolver,
     attemptBudget: routeBudget,
     abortSignal: request?.signal,
     // A standard route already has another provider candidate; do not spend
@@ -369,7 +388,7 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, routeContext = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, routeContext = null, capabilityResolver = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -382,7 +401,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
+      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings, capabilityResolver);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
       if (comboStrategy === "fusion") {
@@ -396,7 +415,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, null, capabilityResolver);
           },
           log,
           comboName: modelStr,
@@ -411,13 +430,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-          adapterAdded
+          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, capabilityResolver),
+          adapterAdded,
+          capabilityResolver
         ),
         log,
         comboName: modelStr,
         comboStrategy,
-        comboStickyLimit
+        comboStickyLimit,
+        capabilityResolver
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -425,6 +446,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+  // Standard-model routes carry their public identity + declared capabilities
+  // in routeContext; both entry points share the same aggregation so the
+  // advertised capabilities match what the runtime strips/forwards.
+  const capabilityContext = {
+    publicName: routeContext?.standardModelPublicName || null,
+    persisted: routeContext?.standardModelCapabilities || null,
+    overrides: routeContext?.capabilityOverrides || null,
+  };
+  const modelCapabilities = capabilityResolver
+    ? capabilityResolver(provider, model, capabilityContext)
+    : resolveCapabilities({ provider, model, ...capabilityContext });
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -505,6 +537,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
+      modelCapabilities,
       credentials: refreshedCredentials,
       log,
       requestSignal: request?.signal,

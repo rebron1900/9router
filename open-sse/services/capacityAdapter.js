@@ -75,11 +75,13 @@ export function getActiveAdapterStrategy(requiredCapabilities, settings) {
   return "fallback";
 }
 
-function modelSatisfies(modelStr, requiredHard) {
+function modelSatisfies(modelStr, requiredHard, capabilityResolver = null) {
   const slash = modelStr.indexOf("/");
   const provider = slash > 0 ? modelStr.slice(0, slash) : "";
   const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
-  const caps = getCapabilitiesForModel(provider, model);
+  const caps = typeof capabilityResolver === "function"
+    ? capabilityResolver(provider, model)
+    : getCapabilitiesForModel(provider, model);
   return requiredHard.every((c) => caps[c] === true);
 }
 
@@ -89,12 +91,12 @@ function modelSatisfies(modelStr, requiredHard) {
 // original models follow as fallback. Leaves `models` untouched when the
 // original list already covers it (combo.js's reorderByCapabilities handles
 // that case via autoSwitch).
-export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings) {
+export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings, capabilityResolver = null) {
   const hard = [...(requiredCapabilities || [])].filter((c) => HARD_CAPS.has(c));
   if (hard.length === 0 || !Array.isArray(models) || models.length === 0) return models;
-  if (models.some((m) => modelSatisfies(m, hard))) return models;
+  if (models.some((m) => modelSatisfies(m, hard, capabilityResolver))) return models;
 
-  const pool = getCapacityAdapterModels(settings).filter((m) => !models.includes(m) && modelSatisfies(m, hard));
+  const pool = getCapacityAdapterModels(settings).filter((m) => !models.includes(m) && modelSatisfies(m, hard, capabilityResolver));
   if (pool.length === 0) return models;
   return [...pool, ...models];
 }
@@ -157,7 +159,7 @@ export function stripHistoryForContext(body, contextWindow) {
 
 // Wrap a handleSingleModel callback so calls to a capacity-adapter model strip
 // history to fit its context window first. No-op passthrough when the pool is empty.
-export function withCapacityAdapterStripping(handleSingleModel, adapterModels) {
+export function withCapacityAdapterStripping(handleSingleModel, adapterModels, capabilityResolver = null) {
   const adapterSet = new Set(adapterModels);
   if (adapterSet.size === 0) return handleSingleModel;
   return (body, modelStr, ...rest) => {
@@ -165,7 +167,9 @@ export function withCapacityAdapterStripping(handleSingleModel, adapterModels) {
       const slash = modelStr.indexOf("/");
       const provider = slash > 0 ? modelStr.slice(0, slash) : "";
       const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
-      const { contextWindow } = getCapabilitiesForModel(provider, model);
+      const { contextWindow } = typeof capabilityResolver === "function"
+        ? capabilityResolver(provider, model)
+        : getCapabilitiesForModel(provider, model);
       body = stripHistoryForContext(body, contextWindow);
     }
     return handleSingleModel(body, modelStr, ...rest);

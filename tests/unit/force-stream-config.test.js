@@ -71,6 +71,8 @@ vi.mock("../../open-sse/rtk/index.js", () => ({
 vi.mock("../../open-sse/rtk/headroom.js", () => ({
   compressWithHeadroom: vi.fn(async () => null),
   formatHeadroomLog: vi.fn(() => ""),
+  formatHeadroomSizeLog: vi.fn(() => ""),
+  isHeadroomPhantomSavings: vi.fn(() => false),
 }));
 
 vi.mock("../../open-sse/providers/capabilities.js", () => ({
@@ -79,6 +81,10 @@ vi.mock("../../open-sse/providers/capabilities.js", () => ({
 
 vi.mock("../../open-sse/translator/concerns/modality.js", () => ({
   stripUnsupportedModalities: vi.fn(() => false),
+  // chatCore imports the modality diagnostics too; the mock must expose them or
+  // the import fails at callback time.
+  countImageInputs: vi.fn(() => 0),
+  summarizeInputShapes: vi.fn(() => "none"),
 }));
 
 vi.mock("../../open-sse/translator/concerns/prefetch.js", () => ({

@@ -17,7 +17,8 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getCapabilitiesForModel, normalizeCapabilityOverrides } from "open-sse/providers/capabilities.js";
+import { resolveCapabilities } from "@/lib/modelCapabilities";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -161,6 +162,37 @@ function inferKindFromUnknownModelId(modelId) {
   if (/tts|speech|audio|voice/.test(lower)) return "tts";
   if (/image|imagen|dall-?e|flux|sdxl|sd-|stable-diffusion/.test(lower)) return "image";
   return LLM_KIND;
+}
+
+// DSH and several OpenAI-compatible clients use modality metadata when
+// deciding whether to preserve uploaded images. Keep the existing capabilities
+// object for 9router consumers, and expose the equivalent input list in both
+// common spellings without changing model ids or routing behavior.
+function inputModalitiesFromCapabilities(capabilities) {
+  if (!capabilities || typeof capabilities !== "object") return null;
+  const modalities = ["text"];
+  if (capabilities.vision === true) modalities.push("image");
+  if (capabilities.pdf === true) modalities.push("pdf");
+  if (capabilities.audioInput === true) modalities.push("audio");
+  if (capabilities.videoInput === true) modalities.push("video");
+  return modalities;
+}
+
+function attachInputModalities(model, capabilities) {
+  const modalities = inputModalitiesFromCapabilities(capabilities);
+  if (!modalities) return model;
+  model.input_modalities = modalities;
+  model.inputModalities = modalities;
+  // llm-pi-ai/DSH model definitions use `input`, while some compatible
+  // clients use the nested OpenCode-style `modalities.input`. Keep all of the
+  // aliases in the discovery response; unknown OpenAI model fields are
+  // ignored by standard clients and this avoids a false text-only fallback.
+  model.input = modalities;
+  model.modalities = {
+    ...(model.modalities && typeof model.modalities === "object" && !Array.isArray(model.modalities) ? model.modalities : {}),
+    input: modalities,
+  };
+  return model;
 }
 
 async function fetchCompatibleModelIds(connection) {
@@ -433,6 +465,7 @@ export async function buildModelsList(kindFilter, options = {}) {
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
       const customModelKindById = new Map();
+      const customModelCapabilitiesById = new Map();
       const customModelIds = customModels
         .filter((m) => {
           if (!m?.id) return false;
@@ -445,7 +478,11 @@ export async function buildModelsList(kindFilter, options = {}) {
         })
         .map((m) => {
           const modelId = String(m.id).trim();
-          if (modelId) customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
+          if (modelId) {
+            customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
+            const caps = normalizeCapabilityOverrides(m.caps);
+            if (Object.keys(caps).length > 0) customModelCapabilitiesById.set(modelId, caps);
+          }
           return modelId;
         })
         .filter((modelId) => modelId !== "");
@@ -491,13 +528,31 @@ export async function buildModelsList(kindFilter, options = {}) {
           owned_by: outputAlias,
         };
         // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
-        // { id, name } — no per-model capability data. Fall back to the same
-        // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
-        // dynamically-discovered LLM models still surface vision/reasoning/search/tools.
-        const caps = liveCapabilitiesById.get(modelId)
-          || capabilitiesFromServiceKind(customKind || liveKind)
-          || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
-        if (caps) model.capabilities = caps;
+        // { id, name } — no per-model capability data. Feed every layer through
+        // the shared resolver so the advertised capabilities match what the
+        // request runtime strips/forwards for the same model. A custom model's
+        // stored capabilities (and service kind) apply only to its own entry;
+        // models without overrides keep the historical live/static result.
+        const liveCaps = liveCapabilitiesById.get(modelId) || null;
+        const serviceKind = customKind || liveKind || null;
+        const customCaps = customModelCapabilitiesById.get(modelId) || null;
+        // Preserve the historical shape: only attach a capabilities block where
+        // there is a runtime-capable kind (LLM) or a media kind was declared by
+        // a custom model / live catalog.
+        const shouldAttachCaps = kind === LLM_KIND || allowAsLlm || !!serviceKind || !!liveCaps;
+        const caps = shouldAttachCaps
+          ? resolveCapabilities({
+            provider: providerId,
+            model: modelId,
+            serviceKind,
+            liveCapabilities: liveCaps,
+            persisted: customCaps,
+          })
+          : null;
+        if (caps) {
+          model.capabilities = caps;
+          attachInputModalities(model, caps);
+        }
         // Token limits under the snake_case names the OpenAI/OpenRouter
         // convention uses. `capabilities.contextWindow` is camelCase and nested,
         // so clients matching context_length find nothing, fall back to guessing
@@ -545,6 +600,23 @@ export async function buildModelsList(kindFilter, options = {}) {
 
   for (const standardModel of standardModels) {
     if (!standardModel?.publicName || standardModel.enabledProviderCount < 1) continue;
+    // Resolve through the same aggregation the request runtime uses. The
+    // bundled authoritative catalog fills any gap the local registration
+    // leaves, but a local record only overrides the fields it actually
+    // declares: a partial object such as { tools: true } must not mask the
+    // catalog's `vision`, while an explicit { vision: false } must survive.
+    // Older local registrations may have an empty capabilities JSON object, so
+    // a stale/partially migrated DB cannot make a known vision model look
+    // text-only to DSH or another capability-aware client.
+    const localCapabilities = standardModel.capabilities && typeof standardModel.capabilities === "object"
+      ? standardModel.capabilities
+      : {};
+    const standardCapabilities = resolveCapabilities({
+      provider: "",
+      model: standardModel.officialModelId || standardModel.publicName,
+      publicName: standardModel.publicName,
+      persisted: localCapabilities,
+    });
     const entry = {
       id: standardModel.publicName,
       object: "model",
@@ -552,9 +624,8 @@ export async function buildModelsList(kindFilter, options = {}) {
       standard_model: true,
       root: standardModel.officialModelId,
     };
-    if (standardModel.capabilities && typeof standardModel.capabilities === "object") {
-      entry.capabilities = standardModel.capabilities;
-    }
+    entry.capabilities = standardCapabilities;
+    attachInputModalities(entry, standardCapabilities);
     if (Number.isFinite(Number(standardModel.limits?.contextWindow))) {
       entry.context_length = Number(standardModel.limits.contextWindow);
     }
