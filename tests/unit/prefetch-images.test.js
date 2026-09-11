@@ -30,6 +30,65 @@ describe("prefetchRemoteImages", () => {
     expect(body.messages[0].content[0].image_url.url.startsWith("data:image/png;base64,")).toBe(true);
   });
 
+  it("openai source -> CommandCode target: converts a remote input_image URL", async () => {
+    const body = { messages: [{ role: "user", content: [{ type: "input_image", image_url: "https://x/a.png" }] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI, FORMATS.COMMANDCODE);
+    expect(n).toBe(1);
+    expect(body.messages[0].content[0].image_url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("normalizes a remote native image source before CommandCode translation", async () => {
+    const body = { messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://x/a.png" } }] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI, FORMATS.COMMANDCODE);
+    expect(n).toBe(1);
+    expect(body.messages[0].content[0].source).toEqual({
+      type: "base64",
+      media_type: "image/png",
+      data: "QUJD",
+    });
+  });
+
+  it("openai-responses source -> CommandCode target: converts input[].input_image URL", async () => {
+    const body = { input: [{ role: "user", content: [
+      { type: "input_text", text: "hi" },
+      { type: "input_image", image_url: "https://x/a.png" },
+    ] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI_RESPONSES, FORMATS.COMMANDCODE);
+    expect(n).toBe(1);
+    expect(body.input[0].content[1].image_url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("openai-responses source -> Gemini target: converts input[].image_url object form", async () => {
+    const body = { input: [{ role: "user", content: [
+      { type: "image_url", image_url: { url: "https://x/b.jpg" } },
+    ] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI_RESPONSES, FORMATS.GEMINI);
+    expect(n).toBe(1);
+    expect(body.input[0].content[0].image_url.url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("openai-responses source: normalizes a native image/source URL block", async () => {
+    const body = { input: [{ role: "user", content: [
+      { type: "image", source: { type: "url", url: "https://x/c.png" } },
+    ] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI_RESPONSES, FORMATS.COMMANDCODE);
+    expect(n).toBe(1);
+    expect(body.input[0].content[0].source).toEqual({
+      type: "base64",
+      media_type: "image/png",
+      data: "QUJD",
+    });
+  });
+
+  it("openai-responses source: skips string input and bare attachment refs without throwing", async () => {
+    expect(await prefetchRemoteImages({ input: "just text" }, FORMATS.OPENAI_RESPONSES, FORMATS.GEMINI)).toBe(0);
+    const body = { input: [{ role: "user", content: [
+      { type: "image", attachment: { file_id: "f_1" } },
+      { type: "input_image", file_id: "f_2" },
+    ] }] };
+    expect(await prefetchRemoteImages(body, FORMATS.OPENAI_RESPONSES, FORMATS.COMMANDCODE)).toBe(0);
+  });
+
   it("skips data URI (already inline)", async () => {
     const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,xx" } }] }] };
     const n = await prefetchRemoteImages(body, FORMATS.OPENAI, FORMATS.OLLAMA);

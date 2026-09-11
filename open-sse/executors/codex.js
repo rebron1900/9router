@@ -11,6 +11,7 @@ import { getModelUpstreamId } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
+import { normalizeResponsesImageBlock } from "../translator/formats/responsesApi.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
 // SSE error patterns inside 200-OK bodies. Some retry same account first; capacity rotates accounts.
@@ -243,11 +244,21 @@ export class CodexExecutor extends BaseExecutor {
     for (const item of body.input) {
       if (!Array.isArray(item.content)) continue;
       const pending = item.content.map(async (c) => {
-        if (c.type !== "image_url") return c;
-        const url = typeof c.image_url === "string" ? c.image_url : c.image_url?.url;
-        const detail = c.image_url?.detail || "auto";
+        // Same-format Responses requests can still contain DSH's native
+        // {type:"image", source:{type:"base64", ...}} block. Normalize any
+        // materialized variant before applying Codex URL prefetching.
+        if (c.type === "image") {
+          return normalizeResponsesImageBlock(c) || c;
+        }
+        if (c.type !== "image_url" && c.type !== "input_image") return c;
+        const url = c.type === "input_image"
+          ? c.image_url
+          : (typeof c.image_url === "string" ? c.image_url : c.image_url?.url);
+        const detail = c.detail || c.image_url?.detail || "auto";
         if (!url) return c;
-        if (url.startsWith("data:")) return { type: "input_image", image_url: url, detail };
+        if (url.startsWith("data:")) {
+          return c.type === "input_image" ? c : { type: "input_image", image_url: url, detail };
+        }
         const fetched = await fetchImageAsBase64(url, { timeoutMs: 15000 });
         return { type: "input_image", image_url: fetched?.url || url, detail };
       });
@@ -256,7 +267,7 @@ export class CodexExecutor extends BaseExecutor {
   }
 
   async execute(args) {
-    const imgCount = Array.isArray(args.body?.input) ? args.body.input.reduce((n, it) => n + (Array.isArray(it.content) ? it.content.filter(c => c.type === "image_url").length : 0), 0) : 0;
+    const imgCount = Array.isArray(args.body?.input) ? args.body.input.reduce((n, it) => n + (Array.isArray(it.content) ? it.content.filter(c => c.type === "image_url" || c.type === "input_image" || c.type === "image").length : 0), 0) : 0;
     const inputLen = Array.isArray(args.body?.input) ? args.body.input.length : 0;
     dbg("CODEX", `execute start | inputItems=${inputLen} | images=${imgCount} | sessionId=${this._currentSessionId || "pending"}`);
     if (imgCount > 0) {

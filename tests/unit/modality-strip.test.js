@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripUnsupportedModalities } from "../../open-sse/translator/concerns/modality.js";
+import { countImageInputs, stripUnsupportedModalities } from "../../open-sse/translator/concerns/modality.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 
 const NO_VISION = { vision: false, audioInput: true, pdf: true };
@@ -47,6 +47,32 @@ describe("stripUnsupportedModalities", () => {
     const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] }] };
     stripUnsupportedModalities(body, FORMATS.OPENAI, NO_AUDIO);
     expect(body.messages[0].content.some((b) => b.type === "image_url")).toBe(true);
+  });
+
+  it("openai: treats input_image as vision content", () => {
+    const body = { messages: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,x" }] }] };
+    stripUnsupportedModalities(body, FORMATS.OPENAI, NO_VISION);
+    expect(body.messages[0].content.some((b) => b.type === "input_image")).toBe(false);
+    expect(body.messages[0].content.some((b) => b.type === "text" && /image omitted/.test(b.text))).toBe(true);
+  });
+
+  it("counts native attachment image blocks for diagnostics", () => {
+    const body = { messages: [{ role: "user", content: [
+      { type: "image", attachment: { id: "owned-by-client" } },
+    ] }] };
+    expect(countImageInputs(body, FORMATS.OPENAI)).toBe(1);
+  });
+
+  it("counts image attachments and base64 image arrays for diagnostics", () => {
+    const body = {
+      messages: [{
+        role: "user",
+        content: "describe",
+        experimental_attachments: [{ contentType: "image/png", url: "data:image/png;base64,aGVsbG8=" }],
+        images: ["aGVsbG8="],
+      }],
+    };
+    expect(countImageInputs(body, FORMATS.OPENAI)).toBe(2);
   });
 
   it("claude: strips image + document by capability", () => {
@@ -97,6 +123,26 @@ describe("stripUnsupportedModalities", () => {
     ] }] };
     stripUnsupportedModalities(body, FORMATS.OPENAI_RESPONSES, NO_VISION);
     expect(body.input[0].content.some((b) => b.type === "input_image")).toBe(false);
+    expect(body.input[0].content.some((b) => b.type === "input_text" && /image omitted/.test(b.text))).toBe(true);
+  });
+
+  it("responses: strips native image/source block when vision:false (matches image counting)", () => {
+    const body = { input: [{ role: "user", content: [
+      { type: "input_text", text: "hi" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "x" } },
+    ] }] };
+    expect(countImageInputs(body, FORMATS.OPENAI_RESPONSES)).toBe(1);
+    stripUnsupportedModalities(body, FORMATS.OPENAI_RESPONSES, NO_VISION);
+    expect(body.input[0].content.some((b) => b.type === "image")).toBe(false);
+    expect(body.input[0].content.some((b) => b.type === "input_text" && /image omitted/.test(b.text))).toBe(true);
+  });
+
+  it("responses: strips image_url block when vision:false", () => {
+    const body = { input: [{ role: "user", content: [
+      { type: "image_url", image_url: { url: "https://x/a.png" } },
+    ] }] };
+    stripUnsupportedModalities(body, FORMATS.OPENAI_RESPONSES, NO_VISION);
+    expect(body.input[0].content.some((b) => b.type === "image_url")).toBe(false);
     expect(body.input[0].content.some((b) => b.type === "input_text" && /image omitted/.test(b.text))).toBe(true);
   });
 

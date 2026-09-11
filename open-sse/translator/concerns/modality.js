@@ -30,10 +30,89 @@ function capForMime(mime) {
 // OpenAI chat content block -> required capability (null = plain text/other, keep).
 function capForOpenAIBlock(block) {
   const t = block?.type;
-  if (t === "image_url" || t === "image") return "vision";
+  if (t === "image_url" || t === "image" || t === "input_image") return "vision";
   if (t === "input_audio" || t === "audio_url") return "audioInput";
   if (t === "file") return "pdf";
   return null;
+}
+
+function isImageAttachment(value) {
+  if (!value || typeof value !== "object") return false;
+  const mime = value.contentType || value.mediaType || value.media_type;
+  if (typeof mime === "string" && mime.toLowerCase().startsWith("image/")) return true;
+  if (typeof value.url === "string" && value.url.toLowerCase().startsWith("data:image/")) return true;
+  return typeof value.data === "string" || typeof value.base64 === "string";
+}
+
+/**
+ * Count image-like inputs without inspecting or logging their contents.
+ * This is diagnostic-only and intentionally includes native attachment
+ * blocks so an adapter/serialization loss is visible at the gateway edge.
+ */
+export function countImageInputs(body, sourceFormat) {
+  if (!body) return 0;
+  const countBlocks = (blocks) => Array.isArray(blocks)
+    ? blocks.filter((block) => capForOpenAIBlock(block) === "vision" || capForClaudeBlock(block) === "vision").length
+    : 0;
+  const countMessage = (message) => {
+    if (!message || typeof message !== "object") return 0;
+    let total = countBlocks(message.content);
+    if (Array.isArray(message.images)) total += message.images.length;
+    for (const attachments of [message.experimental_attachments, message.attachments]) {
+      if (Array.isArray(attachments)) total += attachments.filter(isImageAttachment).length;
+    }
+    if (message.image_url || message.image) total += 1;
+    if (typeof message.content === "string" && message.content.includes("data:image/")) total += 1;
+    return total;
+  };
+
+  switch (sourceFormat) {
+    case FORMATS.OPENAI_RESPONSES:
+    case FORMATS.OPENAI_RESPONSE:
+    case FORMATS.CODEX:
+      // /v1/responses normally reaches chatCore with input[]. Some adapter
+      // implementations first materialize the same request as messages[];
+      // keep diagnostics truthful in both shapes.
+      if (Array.isArray(body.input)) {
+        return body.input.reduce(
+          (total, item) => total + countBlocks(item?.content) + (capForOpenAIBlock(item) === "vision" ? 1 : 0),
+          0,
+        );
+      }
+      return (body.messages || []).reduce((total, message) => total + countMessage(message), 0);
+    case FORMATS.GEMINI:
+    case FORMATS.GEMINI_CLI:
+    case FORMATS.VERTEX:
+      return (body.contents || []).reduce((total, item) => total + (item?.parts || []).filter((part) => capForMime(part?.inlineData?.mimeType || part?.fileData?.mimeType) === "vision").length, 0);
+    case FORMATS.ANTIGRAVITY:
+      return (body?.request?.contents || []).reduce((total, item) => total + (item?.parts || []).filter((part) => capForMime(part?.inlineData?.mimeType || part?.fileData?.mimeType) === "vision").length, 0);
+    default:
+      return (body.messages || []).reduce((total, message) => total + countMessage(message), 0);
+  }
+}
+
+/**
+ * Redacted wire-shape summary for multimodal troubleshooting. It reports only
+ * container names and block types, never URLs, attachment ids, prompts, or
+ * image bytes.
+ */
+export function summarizeInputShapes(body) {
+  if (!body || typeof body !== "object") return "none";
+  const parts = [];
+  const summarize = (label, entries) => {
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      const blocks = Array.isArray(entry?.content)
+        ? entry.content.map((block) => String(block?.type || typeof block)).slice(0, 12)
+        : [];
+      parts.push(`${label}:${String(entry?.type || entry?.role || "item")}[${blocks.join(",")}]`);
+    }
+  };
+  summarize("input", body.input);
+  summarize("messages", body.messages);
+  summarize("contents", body.contents || body.request?.contents);
+  if (Array.isArray(body.images)) parts.push(`root-images:${body.images.length}`);
+  return parts.length > 0 ? parts.slice(0, 12).join("|") : "none";
 }
 
 // Claude content block -> required capability.
@@ -92,7 +171,17 @@ function stripClaude(body, caps) {
   });
 }
 
-// OpenAI Responses input[].content[] (input_image / input_file).
+// OpenAI Responses input[].content[] -> required capability. Must match the
+// vision/in-out detection in capForOpenAIBlock so counting and stripping agree:
+// a block counted as an image must also be strippable when vision is unsupported.
+function capForResponsesBlock(block) {
+  const t = block?.type;
+  if (t === "input_image" || t === "image_url" || t === "image") return "vision";
+  if (t === "input_file") return "pdf";
+  return null;
+}
+
+// OpenAI Responses input[].content[] (input_image / image / image_url / input_file).
 function stripResponses(body, caps) {
   if (!Array.isArray(body.input)) return;
   const last = body.input.length - 1;
@@ -100,7 +189,7 @@ function stripResponses(body, caps) {
     if (!Array.isArray(item.content)) return;
     const removed = new Set();
     item.content = item.content.filter((b) => {
-      const cap = b?.type === "input_image" ? "vision" : b?.type === "input_file" ? "pdf" : null;
+      const cap = capForResponsesBlock(b);
       if (cap && caps[cap] === false) { removed.add(cap); return false; }
       return true;
     });

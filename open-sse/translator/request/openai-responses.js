@@ -8,6 +8,7 @@ import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import {
   normalizeResponsesInput,
+  normalizeResponsesImageBlock,
   clampResponsesCallId,
   coerceResponsesArguments,
   coerceResponsesOutput,
@@ -15,6 +16,45 @@ import {
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
 const MAX_TOOL_NAME_LEN = 128;
+
+/**
+ * Normalize an image block from the OpenAI-compatible/native adapter surface
+ * into the Responses API's input_image shape. DSH can expose images as
+ * image_url, Claude-style image/source, or an attachment carrying already
+ * materialized data. A bare client-owned attachment id is intentionally not
+ * dereferenced here: 9router does not own the client's attachment store.
+ */
+const imageBlockToResponsesInputImage = normalizeResponsesImageBlock;
+
+function attachmentToResponsesInputImage(attachment) {
+  if (!attachment || typeof attachment !== "object") return null;
+  return imageBlockToResponsesInputImage({
+    image_url: attachment.url,
+    data: attachment.data || attachment.base64,
+    mediaType: attachment.mediaType || attachment.media_type || attachment.contentType,
+  });
+}
+
+function messageImagesToResponsesInputImages(msg) {
+  const images = [];
+  const attachments = [
+    ...(Array.isArray(msg?.experimental_attachments) ? msg.experimental_attachments : []),
+    ...(Array.isArray(msg?.attachments) ? msg.attachments : []),
+  ];
+  for (const attachment of attachments) {
+    const image = attachmentToResponsesInputImage(attachment);
+    if (image) images.push(image);
+  }
+
+  // Ollama-compatible clients commonly put base64 images in messages[].images.
+  if (Array.isArray(msg?.images)) {
+    for (const data of msg.images) {
+      const image = imageBlockToResponsesInputImage({ data });
+      if (image) images.push(image);
+    }
+  }
+  return images;
+}
 
 /**
  * Convert OpenAI Responses API request to OpenAI Chat Completions format
@@ -82,15 +122,25 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
 
       // Convert content: input_text → text, output_text → text, input_image → image_url
       const content = Array.isArray(item.content)
-        ? item.content.map(c => {
-          if (c.type === RESPONSES_ITEM.INPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
-          if (c.type === RESPONSES_ITEM.OUTPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
-          if (c.type === RESPONSES_ITEM.INPUT_IMAGE) {
-            const url = c.image_url || c.file_id || "";
-            return { type: OPENAI_BLOCK.IMAGE_URL, image_url: { url, detail: c.detail || "auto" } };
-          }
-          return c;
-        })
+          ? item.content.map(c => {
+            if (c.type === RESPONSES_ITEM.INPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
+            if (c.type === RESPONSES_ITEM.OUTPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
+            if (c.type === RESPONSES_ITEM.INPUT_IMAGE) {
+              const normalized = imageBlockToResponsesInputImage(c);
+              const url = normalized?.image_url || c.file_id || "";
+              return { type: OPENAI_BLOCK.IMAGE_URL, image_url: { url, detail: c.detail || "auto" } };
+            }
+            if (c.type === OPENAI_BLOCK.IMAGE) {
+              const normalized = imageBlockToResponsesInputImage(c);
+              // Preserve an unmaterialized DSH attachment reference for a
+              // downstream native-aware translator; replacing it with an
+              // empty image_url would silently discard the reference.
+              return normalized
+                ? { type: OPENAI_BLOCK.IMAGE_URL, image_url: { url: normalized.image_url, detail: normalized.detail } }
+                : c;
+            }
+            return c;
+          })
         : item.content;
       const msg = { role: item.role, content };
       // Attach buffered reasoning to assistant turn (required by xiaomi-mimo + store=false continuity)
@@ -366,31 +416,30 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       const contentType = msg.role === ROLE.USER ? RESPONSES_ITEM.INPUT_TEXT : RESPONSES_ITEM.OUTPUT_TEXT;
       const content = typeof msg.content === "string"
         ? [{ type: contentType, text: msg.content }]
-        : Array.isArray(msg.content)
-          ? msg.content.map(c => {
-            if (c.type === OPENAI_BLOCK.TEXT) return { type: contentType, text: c.text };
-            // Convert Chat Completions image_url → Responses API input_image
-            // Responses API expects: { type: "input_image", image_url: "<url string>" }
-            // Chat Completions sends: { type: "image_url", image_url: { url: "...", detail: "..." } }
-            if (c.type === OPENAI_BLOCK.IMAGE_URL) {
-              const url = typeof c.image_url === "string" ? c.image_url : c.image_url?.url;
-              return { type: RESPONSES_ITEM.INPUT_IMAGE, image_url: url, detail: c.image_url?.detail || "auto" };
-            }
-            if (c.type === RESPONSES_ITEM.INPUT_IMAGE) return c;
+          : Array.isArray(msg.content)
+            ? msg.content.map(c => {
+              if (c.type === OPENAI_BLOCK.TEXT) return { type: contentType, text: c.text };
+              // Convert Chat Completions/native image blocks → Responses input_image.
+              // Responses expects image_url as a string, while clients use
+              // image_url objects or Claude-style image/source blocks.
+              if (c.type === OPENAI_BLOCK.IMAGE_URL || c.type === RESPONSES_ITEM.INPUT_IMAGE || c.type === OPENAI_BLOCK.IMAGE) {
+                return imageBlockToResponsesInputImage(c) || c;
+              }
             // Serialize any unknown type (tool_use, tool_result, thinking, etc.) as text
-            const text = c.text || c.content || JSON.stringify(c);
-            return { type: contentType, text: typeof text === "string" ? text : JSON.stringify(text) };
-          })
-          : [];
+              const text = c.text || c.content || JSON.stringify(c);
+              return { type: contentType, text: typeof text === "string" ? text : JSON.stringify(text) };
+            })
+            : [];
+      const attachmentImages = messageImagesToResponsesInputImages(msg);
 
       // Only push a message block if content is non-empty.
       // Assistant messages with only tool_calls have content: null — skip the
       // message block in that case; the tool_calls are pushed separately below.
-      if (content.length > 0) {
+      if (content.length > 0 || attachmentImages.length > 0) {
         result.input.push({
           type: RESPONSES_ITEM.MESSAGE,
           role: msg.role,
-          content
+          content: [...content, ...attachmentImages]
         });
       }
     }

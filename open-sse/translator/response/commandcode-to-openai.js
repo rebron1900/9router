@@ -25,18 +25,36 @@ import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
 
 function ensureState(state, model) {
-  if (!state.responseId) {
-    state.responseId = `chatcmpl-${Date.now()}`;
-    state.created = Math.floor(Date.now() / 1000);
-    state.model = state.model || model || "commandcode";
-    state.chunkIndex = 0;
-    state.toolIndex = 0;
-    state.toolIndexById = new Map();
-    state.openTools = new Set();
-    state.openText = false;
-    state.finishReason = null;
-    state.usage = null;
+  // The shared stream state is initialized from the *client* format. For a
+  // Responses client it already contains responseId/created, so using
+  // responseId as the guard here skips the CommandCode-specific fields. That
+  // only becomes visible when the upstream emits tool-input-* events: the
+  // first tool event then crashes on toolIndexById.get(), and the downstream
+  // agent reports an empty response after retries. Initialize each field
+  // independently so both state shapes remain compatible.
+  state.responseId ??= `chatcmpl-${Date.now()}`;
+  state.created ??= Math.floor(Date.now() / 1000);
+  state.model ??= model || "commandcode";
+  state.chunkIndex ??= 0;
+  state.toolIndex ??= 0;
+  state.toolIndexById ??= new Map();
+  state.openTools ??= new Set();
+  state.openText ??= false;
+  state.finishReason ??= null;
+  state.usage ??= null;
+  state.visualProofSeen ??= false;
+  state.visualProofTail ??= "";
+}
+
+// DSH's visual benchmark accepts either a VR-CODE line or a JSON _vr_code
+// field. Track only presence, never the challenge value, for safe diagnostics.
+function observeVisualProof(state, text) {
+  if (typeof text !== "string" || !text) return;
+  const sample = `${state.visualProofTail || ""}${text}`;
+  if (/VR-CODE\s*:/i.test(sample) || /["']_vr_code["']\s*:/i.test(sample)) {
+    state.visualProofSeen = true;
   }
+  state.visualProofTail = sample.slice(-128);
 }
 
 function makeChunk(state, delta, finishReason = null) {
@@ -81,6 +99,7 @@ export function commandCodeToOpenAIResponse(chunk, state) {
     case "text-delta": {
       const text = event.text || event.delta || "";
       if (!text) break;
+      observeVisualProof(state, text);
       const delta = state.chunkIndex === 0 ? { role: ROLE.ASSISTANT, content: text } : { content: text };
       state.chunkIndex++;
       state.openText = true;

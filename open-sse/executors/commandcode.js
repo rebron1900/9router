@@ -3,6 +3,14 @@ import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { commandCodeToOpenAIResponse } from "../translator/response/commandcode-to-openai.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
+import { dbg } from "../utils/debugLog.js";
+
+function countCommandCodeImages(body) {
+  return (body?.params?.messages || []).reduce((total, message) => {
+    if (!Array.isArray(message?.content)) return total;
+    return total + message.content.filter((block) => block?.type === "image").length;
+  }, 0);
+}
 
 /**
  * CommandCodeExecutor — talks to https://api.commandcode.ai/alpha/generate
@@ -40,9 +48,11 @@ export class CommandCodeExecutor extends BaseExecutor {
   }
 
   async execute(opts) {
+    const imageCount = countCommandCodeImages(opts?.body);
+    dbg("COMMANDCODE", `execute start | images=${imageCount} | model=${opts?.model || "unknown"}`);
     const result = await super.execute(opts);
     if (!result?.response?.ok || !result.response.body) return result;
-    result.response = await inspectAndWrapCommandCodeResponse(result.response, opts.model);
+    result.response = await inspectAndWrapCommandCodeResponse(result.response, opts.model, imageCount);
     return result;
   }
 
@@ -123,7 +133,7 @@ export function parseCommandCodeError(event) {
   return { statusCode, message, type };
 }
 
-export async function inspectAndWrapCommandCodeResponse(originalResponse, model) {
+export async function inspectAndWrapCommandCodeResponse(originalResponse, model, imageCount = 0) {
   const reader = originalResponse.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -225,7 +235,7 @@ export async function inspectAndWrapCommandCodeResponse(originalResponse, model)
   }
 
   const combinedStream = createReplayedStream(bufferedLines, buffer, reader);
-  return wrapNdjsonAsOpenAISse(combinedStream, model, originalResponse);
+  return wrapNdjsonAsOpenAISse(combinedStream, model, originalResponse, imageCount);
 }
 
 function createReplayedStream(bufferedLines, remainingBuffer, reader) {
@@ -270,7 +280,7 @@ function createReplayedStream(bufferedLines, remainingBuffer, reader) {
   });
 }
 
-function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null) {
+function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null, imageCount = 0) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
@@ -300,6 +310,9 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null) {
       const trimmed = buffer.trim();
       if (trimmed) {
         emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
+      }
+      if (imageCount > 0) {
+        dbg("COMMANDCODE", `visual proof token=${state.visualProofSeen ? "seen" : "not-seen"} | images=${imageCount}`);
       }
       controller.enqueue(encoder.encode(SSE_DONE));
     },

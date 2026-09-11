@@ -12,8 +12,9 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { randomUUID } from "crypto";
-import { ROLE, OPENAI_BLOCK } from "../schema/index.js";
+import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
+import { parseDataUri } from "../concerns/image.js";
 
 function flattenText(content) {
   if (content == null) return "";
@@ -29,6 +30,44 @@ function flattenText(content) {
   return String(content);
 }
 
+function toCommandCodeImage(part) {
+  const rawImageUrl = part?.type === RESPONSES_ITEM.INPUT_IMAGE ? part.image_url : part?.image_url;
+  const url = typeof rawImageUrl === "string" ? rawImageUrl : rawImageUrl?.url;
+  const parsed = parseDataUri(url);
+  if (parsed) {
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: parsed.mimeType,
+        data: parsed.base64,
+      },
+    };
+  }
+
+  // Some native/adapter clients use the Claude-style image block even when
+  // calling an OpenAI-compatible endpoint. If the attachment has already
+  // been materialized into base64, preserve it instead of turning it into a
+  // text placeholder. A bare attachment reference is intentionally not
+  // dereferenced here: 9router does not own the client's attachment store.
+  const source = part?.source;
+  if (source?.type === "base64" && typeof source.data === "string") {
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: source.media_type || source.mimeType || "image/png",
+        data: source.data,
+      },
+    };
+  }
+
+  return {
+    type: "text",
+    text: "[image omitted: unable to fetch image for CommandCode]",
+  };
+}
+
 function toContentBlocks(content) {
   if (content == null) return [{ type: OPENAI_BLOCK.TEXT, text: "" }];
   if (typeof content === "string") return [{ type: OPENAI_BLOCK.TEXT, text: content }];
@@ -40,8 +79,16 @@ function toContentBlocks(content) {
       } else if (part && typeof part === "object") {
         if (part.type === OPENAI_BLOCK.TEXT && typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
-        } else if (part.type === OPENAI_BLOCK.IMAGE_URL || part.type === OPENAI_BLOCK.IMAGE) {
-          blocks.push({ type: OPENAI_BLOCK.TEXT, text: "[image omitted]" });
+        } else if (
+          part.type === OPENAI_BLOCK.IMAGE_URL ||
+          part.type === OPENAI_BLOCK.IMAGE ||
+          part.type === RESPONSES_ITEM.INPUT_IMAGE
+        ) {
+          const image = toCommandCodeImage(part);
+          // Remote images are normally converted by prefetchRemoteImages()
+          // before this translator runs. Keep a clear placeholder if the
+          // guarded fetch failed instead of sending an unsupported URL shape.
+          blocks.push(image);
         } else if (typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
         }
@@ -88,6 +135,18 @@ function convertMessages(messages = []) {
 
     if (role === ROLE.ASSISTANT) {
       const blocks = [];
+      // Thinking mode requires the previous turn's reasoning to be echoed back,
+      // or the upstream rejects the request with "reasoning_content in the
+      // thinking mode must be passed back to the API". The Responses hop
+      // (request/openai-responses.js) already attached it to this message;
+      // carry it through as a leading reasoning block so it is not dropped.
+      // Deliberately a length check, not a trim(): reasoningContentInjector
+      // satisfies this upstream requirement with a single-space placeholder,
+      // so a whitespace-only value must still be forwarded.
+      const reasoning = typeof m.reasoning_content === "string" && m.reasoning_content.length > 0
+        ? m.reasoning_content
+        : (typeof m.reasoning === "string" && m.reasoning.length > 0 ? m.reasoning : "");
+      if (reasoning) blocks.push({ type: RESPONSES_ITEM.REASONING, text: reasoning });
       const text = flattenText(m.content);
       if (text) blocks.push({ type: OPENAI_BLOCK.TEXT, text });
       if (Array.isArray(m.tool_calls)) {

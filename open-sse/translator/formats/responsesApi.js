@@ -1,4 +1,66 @@
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
+import { encodeDataUri } from "../concerns/image.js";
+
+/**
+ * Convert a native/adapter image block to the wire shape accepted by the
+ * OpenAI Responses API. DSH may pass a durable attachment reference here, but
+ * 9router cannot read a client-owned attachment store; only materialized URL
+ * or base64 data can be safely converted at this boundary.
+ */
+export function normalizeResponsesImageBlock(block) {
+  if (!block || typeof block !== "object") return null;
+
+  const imageUrl = block.image_url;
+  const imageUrlValue = typeof imageUrl === "string" ? imageUrl : imageUrl?.url;
+  const detail = block.detail || imageUrl?.detail || block.source?.detail || "auto";
+  let value = imageUrlValue;
+  let mediaType = block.source?.media_type || block.source?.mimeType || block.media_type || block.mediaType;
+
+  if (!value && block.source && typeof block.source === "object") {
+    if (block.source.type === "url") value = block.source.url;
+    if (block.source.type === "base64") {
+      value = block.source.data;
+      mediaType = mediaType || "image/png";
+    }
+  }
+  if (!value && typeof block.data === "string") {
+    value = block.data;
+    mediaType = mediaType || "image/png";
+  }
+
+  const attachment = block.attachment;
+  if (!value && attachment && typeof attachment === "object") {
+    value = attachment.url || attachment.data || attachment.base64;
+    mediaType = mediaType || attachment.mediaType || attachment.media_type || attachment.contentType;
+  }
+
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const normalized = value.startsWith("data:") || /^https?:\/\//i.test(value)
+    ? value
+    : encodeDataUri(mediaType || "image/png", value);
+  return { type: RESPONSES_ITEM.INPUT_IMAGE, image_url: normalized, detail };
+}
+
+/**
+ * Normalize image blocks already inside a Responses `input[]` body. This is
+ * needed for same-format routes (notably Codex), where the normal
+ * OpenAI→Responses translator is intentionally skipped.
+ */
+export function normalizeResponsesInputImages(body) {
+  if (!body || !Array.isArray(body.input)) return false;
+  let changed = false;
+  for (const item of body.input) {
+    if (!Array.isArray(item?.content)) continue;
+    item.content = item.content.map((block) => {
+      if (block?.type !== OPENAI_BLOCK.IMAGE && block?.type !== OPENAI_BLOCK.IMAGE_URL) return block;
+      const normalized = normalizeResponsesImageBlock(block);
+      if (!normalized) return block;
+      changed = true;
+      return normalized;
+    });
+  }
+  return changed;
+}
 
 /**
  * Normalize Responses API input to array format.

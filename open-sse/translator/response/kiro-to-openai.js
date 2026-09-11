@@ -16,6 +16,18 @@ function chunkMeta(state) {
   return { id: state.responseId, created: state.created, model: state.model || "kiro" };
 }
 
+// The shared stream state may already be initialized from the *client* format.
+// For a Responses client initState() presets responseId/created, so guarding on
+// responseId alone would skip chunkIndex entirely — it would stay undefined,
+// the first chunk would lose role:"assistant", and chunkIndex++ would become
+// NaN. Initialize each field independently so both state shapes stay usable.
+function ensureState(state) {
+  state.responseId ??= `chatcmpl-${Date.now()}`;
+  state.created ??= Math.floor(Date.now() / 1000);
+  state.model ??= "kiro";
+  state.chunkIndex ??= 0;
+}
+
 /**
  * Parse Kiro SSE event and convert to OpenAI format
  * Kiro events: assistantResponseEvent, codeEvent, supplementaryWebLinksEvent, etc.
@@ -64,11 +76,7 @@ export function kiroToOpenAIResponse(chunk, state) {
   }
 
   // Initialize state if needed
-  if (!state.responseId) {
-    state.responseId = `chatcmpl-${Date.now()}`;
-    state.created = Math.floor(Date.now() / 1000);
-    state.chunkIndex = 0;
-  }
+  ensureState(state);
 
   const eventType = data._eventType || data.event || "";
 

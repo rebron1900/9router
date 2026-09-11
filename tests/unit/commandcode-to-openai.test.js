@@ -32,6 +32,14 @@ describe("commandcode-to-openai — text-delta", () => {
     expect(chunks[1].choices[0].delta.role).toBeUndefined();
     expect(chunks[1].choices[0].delta.content).toBe(" world");
   });
+
+  it("preserves visual benchmark proof text in the client-visible content", () => {
+    const { chunks, state } = feed([
+      { type: "text-delta", text: "VR-CODE:ABC123" },
+    ]);
+    expect(chunks[0].choices[0].delta.content).toBe("VR-CODE:ABC123");
+    expect(state.visualProofSeen).toBe(true);
+  });
 });
 
 describe("commandcode-to-openai — reasoning-delta", () => {
