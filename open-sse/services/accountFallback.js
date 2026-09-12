@@ -21,6 +21,13 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0) {
+  // A client disconnect is not a provider failure. Cooling the account down (or
+  // switching to another one) punishes a provider for a request the caller
+  // cancelled, and the cooldown then rejects the following retries with 503 —
+  // a retry storm the gateway inflicts on itself. Bail out before the
+  // unmatched-error default at the bottom of this function applies.
+  if (Number(status) === 499) return { shouldFallback: false, cooldownMs: 0 };
+
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";

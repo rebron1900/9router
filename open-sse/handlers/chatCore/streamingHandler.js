@@ -8,7 +8,7 @@ import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamH
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
-import { createErrorResult } from "../../utils/error.js";
+import { createErrorResult, isClientDisconnect } from "../../utils/error.js";
 import { extractStandardResponseIdFromChunk } from "@/lib/standardModels/runtime";
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
@@ -176,6 +176,13 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const primed = await primeProviderResponse(providerResponse);
     if (primed.error) {
       streamController?.handleError?.(primed.error);
+      // A client that disappears mid-preflight is not a provider failure. Report
+      // 499 so the coordinator neither cools the account down nor fails over.
+      // Checked before the 502: `ResponseAborted` carries an empty message, so
+      // folding it into the generic text below would erase the only signal.
+      if (isClientDisconnect(primed.error)) {
+        return createErrorResult(499, "Request aborted");
+      }
       return createErrorResult(502, `Upstream stream failed before response output: ${primed.error.message}`);
     }
     firstChunk = primed.firstChunk;

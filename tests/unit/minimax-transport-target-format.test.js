@@ -106,7 +106,8 @@ vi.mock("../../open-sse/handlers/chatCore/requestDetail.js", () => ({
   extractRequestConfig: vi.fn((body, stream) => ({ body, stream })),
 }));
 
-vi.mock("../../open-sse/utils/error.js", () => ({
+vi.mock("../../open-sse/utils/error.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   createErrorResult: vi.fn((status, message) => ({ success: false, status, error: message })),
   formatProviderError: vi.fn((error) => error.message),
   parseUpstreamError: vi.fn(),

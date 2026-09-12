@@ -128,6 +128,62 @@ export function unavailableResponse(statusCode, message, retryAfter, retryAfterH
   );
 }
 
+// Errors that mean "the caller went away", not "the provider failed".
+//
+// Every guard in this codebase used to hand-roll `error.name === "AbortError"`.
+// That misses the name Next.js uses when a response is torn down —
+// `ResponseAborted` — whose `message` is empty, so matching the text alone is
+// not enough either. Callers must not cool down or fail over an account for a
+// request the client itself cancelled.
+const CLIENT_DISCONNECT_NAMES = new Set(["AbortError", "ResponseAborted"]);
+const CLIENT_DISCONNECT_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "UND_ERR_SOCKET",
+]);
+const CLIENT_DISCONNECT_MESSAGE_PATTERNS = [
+  "aborted",
+  "socket hang up",
+  "client disconnect",
+  "premature close",
+  "onserverresponseclose",
+];
+
+/**
+ * Whether an error means the client aborted/disconnected.
+ * Accepts an Error, an error-like object, or a plain string (some callers only
+ * keep the message). Walks a bounded `cause` chain, because fetch/stream
+ * wrappers nest the real error one or two levels down.
+ * @param {Error|object|string|null|undefined} error
+ * @returns {boolean}
+ */
+export function isClientDisconnect(error) {
+  if (error === undefined || error === null) return false;
+
+  const candidates = [];
+  if (typeof error === "string") {
+    candidates.push({ message: error });
+  } else if (typeof error === "object") {
+    candidates.push(error);
+    let cause = error.cause;
+    for (let depth = 0; cause && depth < 5; depth++) {
+      candidates.push(cause);
+      cause = typeof cause === "object" ? cause.cause : null;
+    }
+  } else {
+    candidates.push({ message: String(error) });
+  }
+
+  for (const candidate of candidates) {
+    if (typeof candidate?.name === "string" && CLIENT_DISCONNECT_NAMES.has(candidate.name)) return true;
+    if (typeof candidate?.code === "string" && CLIENT_DISCONNECT_CODES.has(candidate.code)) return true;
+    const message = typeof candidate?.message === "string" ? candidate.message.toLowerCase() : "";
+    if (message && CLIENT_DISCONNECT_MESSAGE_PATTERNS.some((pattern) => message.includes(pattern))) return true;
+  }
+  return false;
+}
+
 /**
  * Format provider error with context
  * @param {Error} error - Original error

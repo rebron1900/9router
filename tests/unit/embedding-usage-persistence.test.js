@@ -23,7 +23,8 @@ vi.mock("../../src/sse/services/model.js", () => ({
 vi.mock("../../open-sse/handlers/embeddingsCore.js", () => ({
   handleEmbeddingsCore: mocks.handleEmbeddingsCore,
 }));
-vi.mock("../../open-sse/utils/error.js", () => ({
+vi.mock("../../open-sse/utils/error.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   errorResponse: (status, message) => Response.json({ error: message }, { status }),
   unavailableResponse: (status, message) => Response.json({ error: message }, { status }),
 }));

@@ -1,6 +1,7 @@
 // Stream handler with disconnect detection - shared for all providers
 import { STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
+import { isClientDisconnect } from "./error.js";
 
 // Get HH:MM:SS timestamp
 function getTimeString() {
@@ -85,7 +86,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
         abortTimeout = null;
       }
 
-      if (error.name === "AbortError") {
+      if (isClientDisconnect(error)) {
         logStream("⚡", "ABORTED");
         return;
       }
@@ -154,17 +155,13 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         // Treat network resets / socket hang up / abort as graceful close
         const msg = error?.message || "";
         const code = error?.code || error?.cause?.code || "";
+        // Client aborts and transport resets are a graceful close, not a provider
+        // failure. ETIMEDOUT stays separate: an upstream connect/read timeout is a
+        // real provider problem and must keep surfacing as an error.
         const isNetworkClose =
-          error.name === "AbortError" ||
-          msg.includes("aborted") ||
-          msg.includes("socket hang up") ||
-          msg.includes("ECONNRESET") ||
+          isClientDisconnect(error) ||
           msg.includes("ETIMEDOUT") ||
-          msg.includes("EPIPE") ||
-          code === "ECONNRESET" ||
-          code === "ETIMEDOUT" ||
-          code === "EPIPE" ||
-          code === "UND_ERR_SOCKET";
+          code === "ETIMEDOUT";
 
         // Graceful close on network/abort, or when a structured terminal is available
         // (Responses passthrough prefers response.failed + [DONE] over a raw transport error)
