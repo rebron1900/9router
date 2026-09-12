@@ -113,6 +113,97 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     };
   };
 
+  it("returns null immediately when the upstream is not SSE", async () => {
+    vi.useFakeTimers();
+    try {
+      const resultPromise = handleForcedSSEToJson({
+        providerResponse: new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" }
+        }),
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        provider: "op-test-chat",
+        model: "gpt-x",
+        body: { model: "gpt-x", messages: [] },
+        stream: false,
+        requestStartTime: Date.now(),
+        connectionId: "test-connection",
+        clientRawRequest: { endpoint: "/v1/chat/completions" },
+        trackDone: vi.fn(),
+        appendLog: vi.fn()
+      });
+      await vi.advanceTimersByTimeAsync(8_000);
+      await expect(resultPromise).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a delayed forced stream alive with JSON-safe whitespace", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let upstreamController;
+      const providerResponse = new Response(new ReadableStream({
+        start(controller) {
+          upstreamController = controller;
+        }
+      }), { headers: { "content-type": "text/event-stream" } });
+
+      const resultPromise = handleForcedSSEToJson({
+        providerResponse,
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        provider: "op-test-chat",
+        model: "gpt-x",
+        body: { model: "gpt-x", messages: [] },
+        stream: false,
+        requestStartTime: Date.now(),
+        connectionId: "test-connection",
+        clientRawRequest: { endpoint: "/v1/chat/completions" },
+        trackDone: vi.fn(),
+        appendLog: vi.fn()
+      });
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      const result = await resultPromise;
+      expect(result.success).toBe(true);
+
+      const reader = result.response.body.getReader();
+      // The graceful path flushes one whitespace byte as soon as it takes
+      // over, before any heartbeat interval has elapsed.
+      const immediate = await reader.read();
+      expect(new TextDecoder().decode(immediate.value)).toBe("\n");
+
+      const heartbeatRead = reader.read();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const heartbeat = await heartbeatRead;
+      expect(new TextDecoder().decode(heartbeat.value)).toBe("\n");
+
+      upstreamController.enqueue(encoder.encode([
+        'data: {"id":"chatcmpl-delayed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-x","choices":[{"delta":{"content":"done"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+        ""
+      ].join("\n\n")));
+      upstreamController.close();
+
+      const finalChunk = await reader.read();
+      const finalText = new TextDecoder().decode(finalChunk.value);
+      expect(finalText).toContain('"done"');
+      // The leading whitespace must stay invisible to a JSON client.
+      const parsed = JSON.parse(
+        new TextDecoder().decode(immediate.value) +
+          new TextDecoder().decode(heartbeat.value) +
+          finalText,
+      );
+      expect(parsed.object).toBe("chat.completion");
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("parses chat SSE chunks and returns a Responses function_call body", async () => {
     const result = await handleForcedSSEToJson(sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI));
     expect(result.success).toBe(true);

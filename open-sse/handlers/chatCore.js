@@ -519,13 +519,24 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
 async function captureResponseId(result, onResponseId) {
   if (!result?.success || !result.response || typeof onResponseId !== "function") return;
-  try {
-    const payload = await result.response.clone().json();
-    const responseId = payload?.id || payload?.response?.id || payload?.data?.id;
-    if (responseId) onResponseId(responseId);
-  } catch {
-    // A response ID is an affinity hint; it must never break a successful response.
+  const capture = async () => {
+    try {
+      const payload = await result.response.clone().json();
+      const responseId = payload?.id || payload?.response?.id || payload?.data?.id;
+      if (responseId) onResponseId(responseId);
+    } catch {
+      // A response ID is an affinity hint; it must never break a successful response.
+    }
+  };
+
+  if (result.deferResponseId) {
+    // Streaming JSON may contain heartbeat whitespace for many seconds. Do not
+    // hold back the actual response while the affinity hint is being recovered.
+    capture().catch(() => {});
+    return;
   }
+
+  await capture();
 }
 
 export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {

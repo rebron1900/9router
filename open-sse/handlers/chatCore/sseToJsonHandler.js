@@ -179,7 +179,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -358,4 +358,80 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     if (isClientDisconnect(err)) return createErrorResult(499, "Request aborted");
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
   }
+}
+
+
+// A forced-stream provider (CommandCode is one) still has to be buffered when
+// the client asked for JSON. Large compaction prompts can take tens of seconds;
+// returning nothing during that time makes normal HTTP clients assume the
+// request died and retry it. JSON permits leading whitespace, so once buffering
+// crosses the grace period we keep the connection alive with whitespace and
+// append the real JSON document when aggregation finishes.
+const FORCED_JSON_HEARTBEAT_GRACE_MS = 5_000;
+const FORCED_JSON_HEARTBEAT_MS = 5_000;
+
+export async function handleForcedSSEToJson(context) {
+  const buffered = handleForcedSSEToJsonBuffered(context).then(
+    (result) => ({ type: "buffered", result }),
+    (error) => ({ type: "error", error }),
+  );
+  let graceTimer;
+  const grace = new Promise((resolve) => {
+    graceTimer = setTimeout(() => resolve({ type: "grace" }), FORCED_JSON_HEARTBEAT_GRACE_MS);
+  });
+  const outcome = await Promise.race([buffered, grace]);
+  if (outcome.type === "buffered") {
+    clearTimeout(graceTimer);
+    return outcome.result;
+  }
+  if (outcome.type === "error") {
+    clearTimeout(graceTimer);
+    throw outcome.error;
+  }
+
+  // The response headers are committed as a 200 once this stream is returned.
+  // This branch is intentionally only reached after the normal fast/error grace
+  // period; short requests retain their original status and error semantics.
+  const encoder = new TextEncoder();
+  let heartbeatTimer;
+  const stream = new ReadableStream({
+    async start(controller) {
+      // The client has already waited out the grace period, so flush one byte
+      // right away: every extra silent second moves it closer to its own
+      // request deadline. JSON permits this leading whitespace.
+      try { controller.enqueue(encoder.encode("\n")); } catch { /* client gone */ }
+      heartbeatTimer = setInterval(() => {
+        try { controller.enqueue(encoder.encode("\n")); } catch { /* client gone */ }
+      }, FORCED_JSON_HEARTBEAT_MS);
+      try {
+        const { result } = await buffered;
+        const body = result?.response ? await result.response.text() : JSON.stringify({ error: { message: result?.error || "Request failed" } });
+        controller.enqueue(encoder.encode(body));
+        controller.close();
+      } catch (error) {
+        try { controller.error(error); } catch { /* client gone */ }
+      } finally {
+        clearInterval(heartbeatTimer);
+      }
+    },
+    cancel() {
+      clearInterval(heartbeatTimer);
+    },
+  });
+  return {
+    success: true,
+    // The response body is intentionally still being produced after this
+    // handler returns. captureResponseId must not await clone().json() here,
+    // otherwise it defeats the heartbeat and delays the headers until the
+    // upstream has completely finished.
+    deferResponseId: true,
+    response: new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*"
+      }
+    })
+  };
 }
