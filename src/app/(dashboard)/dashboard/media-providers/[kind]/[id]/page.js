@@ -13,6 +13,7 @@ import { EmbeddingExampleCard } from "./components/EmbeddingExampleCard";
 import { TtsExampleCard } from "./components/TtsExampleCard";
 import { GenericExampleCard } from "./components/GenericExampleCard";
 import { SttExampleCard } from "./components/SttExampleCard";
+import ImageStudioPageClient from "@/app/(dashboard)/dashboard/images/ImageStudioPageClient";
 
 // MediaProviderDetailPage
 export default function MediaProviderDetailPage() {
@@ -192,7 +193,8 @@ export default function MediaProviderDetailPage() {
       )}
       {kind === "tts" && <TtsExampleCard providerId={id} />}
       {kind === "stt" && !isCustom && <SttExampleCard providerId={id} />}
-      {!isCustom && KIND_EXAMPLE_CONFIG[kind] && <GenericExampleCard providerId={id} kind={kind} />}
+      {kind === "image" && !isCustom && <ImageStudioPageClient providerId={id} embedded />}
+      {!isCustom && kind !== "image" && KIND_EXAMPLE_CONFIG[kind] && <GenericExampleCard providerId={id} kind={kind} />}
 
       {isCustom && (
         <AddCustomEmbeddingModal

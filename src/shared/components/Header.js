@@ -43,11 +43,21 @@ const getPageInfo = (pathname) => {
     const kindConfig = MEDIA_PROVIDER_KINDS.find((k) => k.id === kindId);
     return {
       title: kindConfig?.label || kindId,
-      description: `Manage your ${kindConfig?.label || kindId} providers`,
+      description: kindId === "image"
+        ? "Create and edit images with your configured providers"
+        : `Manage your ${kindConfig?.label || kindId} providers`,
       icon: kindConfig?.icon || "perm_media",
       breadcrumbs: [],
     };
   }
+
+  if (pathname.includes("/images"))
+    return {
+      title: "Image Studio",
+      description: "Create and edit images with your configured providers",
+      icon: "brush",
+      breadcrumbs: [],
+    };
 
   // Provider detail page: /dashboard/providers/[id]
   const providerMatch = pathname.match(/\/providers\/([^/]+)$/);

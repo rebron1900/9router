@@ -27,8 +27,9 @@ export default {
       callBackUrl: "https://localhost/callback",
     };
     if (isEdit) {
-      const urls = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
-      if (body.image) urls.push(body.image);
+      const urls = Array.isArray(body.images)
+        ? body.images.filter(Boolean)
+        : (body.image ? [body.image] : []);
       req.imageUrls = urls;
     }
     return req;

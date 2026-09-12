@@ -5,7 +5,7 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels, getStandardModelBindings } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
@@ -19,6 +19,7 @@ import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { getCapabilitiesForModel, normalizeCapabilityOverrides } from "open-sse/providers/capabilities.js";
 import { resolveCapabilities } from "@/lib/modelCapabilities";
+import { planStandardModelCandidates } from "@/lib/standardModels/planner";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -277,6 +278,37 @@ function providerMatchesKinds(providerId, kindFilter) {
 function comboMatchesKinds(combo, kindFilter) {
   const kind = combo?.kind || LLM_KIND;
   return kindFilter.includes(kind);
+}
+
+function providerModelIsImageCapable(providerId, upstreamModelId) {
+  const providerAliases = [providerId, PROVIDER_ID_TO_ALIAS[providerId]].filter(Boolean);
+  const catalogModel = providerAliases
+    .flatMap((alias) => PROVIDER_MODELS[alias] || [])
+    .find((model) => model?.id === upstreamModelId);
+  if (catalogModel?.kind === "image" || catalogModel?.type === "image") return true;
+  return getCapabilitiesForModel(providerId, upstreamModelId).imageOutput === true;
+}
+
+async function standardModelHasImageCapability(standardModel, standardCapabilities) {
+  const declared = standardModel?.capabilities?.imageOutput;
+  if (typeof declared === "boolean") return declared;
+  if (standardCapabilities?.imageOutput === true) return true;
+
+  try {
+    const bindings = await getStandardModelBindings(standardModel.id);
+    const plan = planStandardModelCandidates({
+      model: standardModel,
+      bindings,
+      requestFormat: "openai-images",
+      // Discovery accepts mappings that explicitly serve either generation or
+      // edit; the request handler applies the concrete operation at runtime.
+      operation: null,
+      requireConfiguredProvider: true,
+    });
+    return plan.candidates.some((candidate) => providerModelIsImageCapable(candidate.providerId, candidate.upstreamModelId));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -621,12 +653,17 @@ export async function buildModelsList(kindFilter, options = {}) {
     const localCapabilities = standardModel.capabilities && typeof standardModel.capabilities === "object"
       ? standardModel.capabilities
       : {};
-    const standardCapabilities = resolveCapabilities({
+    let standardCapabilities = resolveCapabilities({
       provider: "",
       model: standardModel.officialModelId || standardModel.publicName,
       publicName: standardModel.publicName,
       persisted: localCapabilities,
     });
+    const hasImageCapability = await standardModelHasImageCapability(standardModel, standardCapabilities);
+    if (hasImageCapability && standardCapabilities.imageOutput !== true) {
+      standardCapabilities = { ...standardCapabilities, imageOutput: true };
+    }
+    if (kindFilter.includes("image") && !hasImageCapability) continue;
     const entry = {
       id: standardModel.publicName,
       object: "model",

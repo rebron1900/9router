@@ -48,6 +48,22 @@ function toDataUrl(input) {
   return `data:image/png;base64,${input}`;
 }
 
+function collectImageRefs(body) {
+  const refs = [];
+  if (Array.isArray(body?.images)) body.images.forEach((image) => {
+    const url = toDataUrl(image);
+    if (url) refs.push(url);
+  });
+  // The shared parser keeps `image` as a compatibility alias for the first
+  // item in `images`; do not append it a second time or collapse intentional
+  // repeated multipart inputs.
+  if (!Array.isArray(body?.images)) {
+    const single = toDataUrl(body?.image);
+    if (single) refs.push(single);
+  }
+  return refs;
+}
+
 function buildContent(prompt, refs, detail = CODEX_REF_DETAIL) {
   const content = [];
   refs.forEach((url, index) => {
@@ -177,17 +193,22 @@ export default {
     };
   },
   buildBody: (model, body) => {
-    const refs = [];
-    if (Array.isArray(body.images)) body.images.forEach((i) => { const u = toDataUrl(i); if (u) refs.push(u); });
-    const single = toDataUrl(body.image);
-    if (single) refs.push(single);
+    const refs = collectImageRefs(body);
+    const mask = toDataUrl(body.mask_image || body.maskImage || body.mask || body.maskimage);
     const detail = body.image_detail || CODEX_REF_DETAIL;
     const { responsesModel, toolModel } = resolveCodexImageModels(model);
     const imgTool = { type: "image_generation", output_format: (body.output_format || "png").toLowerCase() };
+    const isEdit = body._imageOperation === "edit" || body.operation === "edit";
     if (toolModel) {
-      imgTool.action = refs.length > 0 ? "edit" : "generate";
+      // Keep the legacy generations behavior for callers that supplied an
+      // input image, while the dedicated edits route can force edit mode even
+      // when the input is represented by a mask-only payload.
+      imgTool.action = isEdit || refs.length > 0 ? "edit" : "generate";
       imgTool.model = toolModel;
+    } else if (isEdit) {
+      imgTool.action = "edit";
     }
+    if (mask) imgTool.input_image_mask = { image_url: mask };
     if (body.size && body.size !== "") imgTool.size = body.size;
     if (body.quality && body.quality !== "") imgTool.quality = body.quality;
     if (body.background && body.background !== "") imgTool.background = body.background;

@@ -1,3 +1,10 @@
+# v0.5.77 (2026-09-12)
+
+## Features
+- **Image generation**: add unified text-to-image and image-to-image workspace, provider detail testing, standard image routing, and OpenAI-compatible generation/edit endpoints
+- **Image Studio**: document request bodies, response bodies, binary output, streaming events, and display generated results beside the request specification
+- **Internationalization**: add Simplified Chinese and Traditional Chinese translations for the image generation workspace
+
 # v0.5.76 (2026-09-12)
 
 ## Fixes

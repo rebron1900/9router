@@ -18,6 +18,7 @@ const EMPTY_MODEL = {
   sourceUrl: "",
   lifecycle: "active",
   enabled: true,
+  capabilities: {},
 };
 
 const EMPTY_BINDING = {
@@ -716,6 +717,7 @@ export default function StandardModelsPage() {
           {(editingModel || modelSource === "custom") && <div className="mt-4 grid gap-3">
             {[["publicName", "Canonical model name", "e.g. gpt-5.6-luna"], ["officialModelId", "Official model ID", "Original ID from the official API"], ["publisher", "Model publisher", "e.g. OpenAI"], ["displayName", "Display name", "Optional"], ["sourceUrl", "Official source URL", "Optional"]].map(([key, label, placeholder]) => <label key={key} className="grid gap-1 text-sm text-text-main"><span>{t(label)}</span><input className="rounded-lg border border-border bg-background px-3 py-2 outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-60" value={modelForm[key] || ""} placeholder={t(placeholder)} onChange={(event) => setModelForm({ ...modelForm, [key]: event.target.value })} required={key === "publicName"} disabled={Boolean(editingModel?.catalogVersion) && (key === "publicName" || key === "officialModelId")} /></label>)}
             <label className="flex items-center gap-2 text-sm text-text-main"><input type="checkbox" checked={modelForm.enabled !== false} onChange={(event) => setModelForm({ ...modelForm, enabled: event.target.checked })} />{t("Enable this standard model")}</label>
+            <label className="flex items-center gap-2 text-sm text-text-main"><input type="checkbox" checked={modelForm.capabilities?.imageOutput === true} onChange={(event) => setModelForm({ ...modelForm, capabilities: { ...(modelForm.capabilities || {}), imageOutput: event.target.checked } })} />{t("Image generation / editing capability")}</label>
             <label className="grid gap-1 text-sm text-text-main"><span>{t("Lifecycle")}</span><select className="rounded-lg border border-border bg-background px-3 py-2" value={modelForm.lifecycle || "active"} onChange={(event) => setModelForm({ ...modelForm, lifecycle: event.target.value })}><option value="active">{t("active")}</option><option value="preview">{t("preview")}</option><option value="deprecated">{t("deprecated")}</option><option value="retired">{t("retired")}</option></select></label>
           </div>}
           <div className="mt-5 flex justify-end gap-2"><button type="button" className="rounded-lg border border-border px-3 py-2 text-sm" onClick={() => setShowModelForm(false)}>{t("Cancel")}</button><button disabled={saving || (!editingModel && modelSource === "catalog" && !selectedCatalogModel)} className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white disabled:opacity-50">{editingModel ? t("Save changes") : t("Register model")}</button></div>
