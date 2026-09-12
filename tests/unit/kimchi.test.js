@@ -1,4 +1,4 @@
-import { describe, it, before } from "node:test";
+import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 
 // Load the registry entry once for the suite so a load failure is reported
@@ -7,13 +7,19 @@ import assert from "node:assert/strict";
 let kimchiEntry;
 
 describe("kimchi registry entry", () => {
-  before(async () => {
+  beforeAll(async () => {
     kimchiEntry = (await import("../../open-sse/providers/registry/kimchi.js")).default;
   });
 
-  it("is an oauth provider auto-listed via byCategory", () => {
+  it("is auto-listed via byCategory under the freeTier bucket", () => {
     assert.equal(kimchiEntry.id, "kimchi");
-    assert.equal(kimchiEntry.category, "oauth");
+    // 6d96e24b ("chore(providers): refresh catalogs, free tiers, and hide
+    // stale ones") deliberately moved kimchi from `oauth` to `freeTier`
+    // (alongside bazaarlink and kilo-gateway). OAuth support itself is
+    // unchanged — it is expressed by `hasOAuth` / `authModes`.
+    assert.equal(kimchiEntry.category, "freeTier");
+    assert.equal(kimchiEntry.hasOAuth, true);
+    assert.ok(kimchiEntry.authModes.includes("oauth"));
   });
 
   it("points at the OpenAI-compatible gateway with an authenticated UA", () => {

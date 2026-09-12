@@ -17,8 +17,20 @@ beforeAll(async () => {
   await db.initDb();
 });
 
-afterAll(() => {
-  if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+afterAll(async () => {
+  // Close the SQLite handle before deleting the directory. On Windows an open
+  // handle makes rmSync fail with EBUSY, which surfaced as a suite-level error
+  // whenever another test process happened to touch the same temp root.
+  try {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    (await getAdapter())?.close?.();
+  } catch { /* best effort */ }
+  if (tempDir) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); break; }
+      catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+  }
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
 });
@@ -26,9 +38,16 @@ afterAll(() => {
 describe("DB Concurrency — atomic safety", () => {
   it("100 parallel saveRequestUsage → no count loss", async () => {
     const N = 100;
+    const base = Date.now();
     const promises = [];
     for (let i = 0; i < N; i++) {
       promises.push(db.saveRequestUsage({
+        // Distinct ISO timestamp per entry. Two reasons:
+        //  1. rows are stored with an ISO string and the 24h window filters
+        //     with a string comparison, so a numeric value breaks the query;
+        //  2. identical payloads are collapsed by design (usage logging
+        //     dedupe), which would test the dedupe rather than concurrency.
+        timestamp: new Date(base + i).toISOString(),
         provider: "openai", model: "gpt-4", connectionId: "c1",
         tokens: { prompt_tokens: 10, completion_tokens: 5 },
         endpoint: "/v1/chat", status: "ok",
@@ -67,9 +86,13 @@ describe("DB Concurrency — atomic safety", () => {
   }, 15000);
 
   it("mixed concurrent: usage + details + connections + aliases", async () => {
+    const base = Date.now();
     const ops = [];
     for (let i = 0; i < 50; i++) {
       ops.push(db.saveRequestUsage({
+        // Distinct ISO timestamp so the 24h window matches and the dedupe
+        // does not collapse these; the assertion is about concurrency.
+        timestamp: new Date(base + i).toISOString(),
         provider: "anthropic", model: `m-${i % 3}`, connectionId: "c2",
         tokens: { prompt_tokens: 20 }, status: "ok",
       }));
@@ -151,9 +174,15 @@ describe("DB Concurrency — atomic safety", () => {
 
   it("daily summary aggregates correctly under parallel writes", async () => {
     const N = 50;
+    const base = Date.now();
     const promises = [];
     for (let i = 0; i < N; i++) {
       promises.push(db.saveRequestUsage({
+        // Distinct ISO timestamp per entry. Concurrent calls share a
+        // millisecond, and usage logging dedupes on (timestamp, provider,
+        // model, connectionId, apiKey, promptTokens, completionTokens), so
+        // identical payloads in the same millisecond collapse into one row.
+        timestamp: new Date(base + i).toISOString(),
         provider: "google", model: "gemini-pro", connectionId: "cG",
         tokens: { prompt_tokens: 100, completion_tokens: 50 },
         status: "ok",
