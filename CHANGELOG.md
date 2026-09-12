@@ -1,3 +1,8 @@
+# v0.5.78 (2026-09-12)
+
+## Fixes
+- **Image Studio**: use the first active system API key when loading remote image model catalogs, so deployed dashboards can access `/api/v1/models/image` and `/api/v1/models` without a 401
+
 # v0.5.77 (2026-09-12)
 
 ## Features

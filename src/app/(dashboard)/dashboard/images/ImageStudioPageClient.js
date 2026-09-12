@@ -177,14 +177,21 @@ export default function ImageStudioPageClient({ providerId = "", embedded = fals
     async function loadStudioData() {
       setLoading(true);
       try {
-        const [imageModelsResponse, keysResponse, providersResponse] = await Promise.all([
-          providerId ? Promise.resolve(null) : fetch("/api/v1/models/image", { cache: "no-store" }),
+        const [keysResponse, providersResponse] = await Promise.all([
           fetch("/api/keys", { cache: "no-store" }),
           fetch("/api/providers", { cache: "no-store" }),
         ]);
-        const imageModelsData = imageModelsResponse?.ok ? await imageModelsResponse.json() : { data: [] };
         const keysData = keysResponse.ok ? await keysResponse.json() : { keys: [] };
         const providersData = providersResponse.ok ? await providersResponse.json() : { connections: [] };
+        const firstActiveApiKey = keysData.keys?.find((entry) => entry?.isActive !== false)?.key || "";
+        const modelRequestOptions = {
+          cache: "no-store",
+          ...(firstActiveApiKey ? { headers: { Authorization: `Bearer ${firstActiveApiKey}` } } : {}),
+        };
+        const imageModelsResponse = providerId
+          ? null
+          : await fetch("/api/v1/models/image", modelRequestOptions);
+        const imageModelsData = imageModelsResponse?.ok ? await imageModelsResponse.json() : { data: [] };
 
         let nextModels = providerId
           ? getProviderImageModels(providerId)
@@ -192,7 +199,7 @@ export default function ImageStudioPageClient({ providerId = "", embedded = fals
           ? imageModelsData.data.filter((entry) => entry?.id)
           : [];
         if (!providerId && nextModels.length === 0) {
-          const fallbackResponse = await fetch("/api/v1/models", { cache: "no-store" });
+          const fallbackResponse = await fetch("/api/v1/models", modelRequestOptions);
           const fallbackData = fallbackResponse.ok ? await fallbackResponse.json() : { data: [] };
           nextModels = Array.isArray(fallbackData.data)
             ? fallbackData.data.filter((entry) => entry?.id && (
@@ -206,7 +213,7 @@ export default function ImageStudioPageClient({ providerId = "", embedded = fals
         setModel((current) => current && nextModels.some((entry) => entry.id === current)
           ? current
           : (nextModels[0]?.id || ""));
-        setApiKey(keysData.keys?.find((entry) => entry?.isActive !== false)?.key || "");
+        setApiKey(firstActiveApiKey);
         setConnections((providersData.connections || []).filter((entry) => entry?.isActive !== false && (!providerId || entry.provider === providerId)));
       } catch (loadError) {
         if (!cancelled) setError(loadError.message || translate("Unable to load image models"));
