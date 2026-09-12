@@ -53,6 +53,11 @@ export function filterToOpenAIFormat(body, opts = {}) {
       if (filteredContent.length === 0) {
         filteredContent.push({ type: OPENAI_BLOCK.TEXT, text: "" });
       }
+      // Collapse a text-only array to a plain string: several upstreams reject
+      // array content when every part is text, and a string is the canonical shape.
+      if (!keepCache && filteredContent.every((b) => b.type === OPENAI_BLOCK.TEXT)) {
+        return { ...msg, content: filteredContent.map((b) => b.text || "").join("\n") };
+      }
       
       return { ...msg, content: filteredContent };
     }
