@@ -116,6 +116,7 @@ async function flushToDatabase() {
 
           const record = {
             id: item.id,
+            requestId: item.requestId || null,
             provider: item.provider || null,
             model: item.model || null,
             connectionId: item.connectionId || null,
@@ -173,61 +174,116 @@ export async function saveRequestDetail(detail) {
 
 export async function getRequestDetails(filter = {}) {
   const db = await getAdapter();
-  const conds = [];
-  const params = [];
-
-  if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
-  if (filter.model) { conds.push("model LIKE ?"); params.push(`%${filter.model}%`); }
-  if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
-  appendStatusFilter(conds, params, filter.status);
-  if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
-  if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
-
-  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const cntRow = db.get(`SELECT COUNT(*) as c FROM requestDetails ${where}`, params);
   const page = filter.page || 1;
   const pageSize = filter.pageSize || 50;
   const offset = (page - 1) * pageSize;
 
-  const detailCount = cntRow ? cntRow.c : 0;
-  if (detailCount > 0) {
-    const totalPages = Math.ceil(detailCount / pageSize);
-    const rows = db.all(
-      `SELECT data FROM requestDetails ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
-      [...params, pageSize, offset]
-    );
-    return {
-      details: rows.map((r) => parseJson(r.data, {})),
-      pagination: { page, pageSize, totalItems: detailCount, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
-      source: "requestDetails",
-    };
-  }
-
-  // Observability is optional, but the Usage > Details page should still be
-  // useful when it is disabled. Fall back to the durable usage history and
-  // expose token/routing metadata without fabricating conversation payloads.
+  // Observability is optional, but Usage > Details must still expose newer
+  // durable usage rows. Keep filtering, ordering, deduplication, counting and
+  // pagination in SQLite: materialising both unbounded tables here made every
+  // page request O(all history) in memory and CPU.
+  const detailConds = [];
+  const detailParams = [];
   const historyConds = [];
   const historyParams = [];
-  if (filter.provider) { historyConds.push("provider = ?"); historyParams.push(filter.provider); }
-  if (filter.model) { historyConds.push("model LIKE ?"); historyParams.push(`%${filter.model}%`); }
-  if (filter.connectionId) { historyConds.push("connectionId = ?"); historyParams.push(filter.connectionId); }
-  appendStatusFilter(historyConds, historyParams, filter.status);
-  if (filter.startDate) { historyConds.push("timestamp >= ?"); historyParams.push(new Date(filter.startDate).toISOString()); }
-  if (filter.endDate) { historyConds.push("timestamp <= ?"); historyParams.push(new Date(filter.endDate).toISOString()); }
+  const addCommonFilters = (conds, params) => {
+    if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
+    if (filter.model) { conds.push("model LIKE ?"); params.push(`%${filter.model}%`); }
+    if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
+    appendStatusFilter(conds, params, filter.status);
+    if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
+    if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
+  };
+  addCommonFilters(detailConds, detailParams);
+  addCommonFilters(historyConds, historyParams);
 
+  const detailWhere = detailConds.length ? `WHERE ${detailConds.join(" AND ")}` : "";
   const historyWhere = historyConds.length ? `WHERE ${historyConds.join(" AND ")}` : "";
-  const historyCountRow = db.get(`SELECT COUNT(*) as c FROM usageHistory ${historyWhere}`, historyParams);
-  const totalItems = historyCountRow ? historyCountRow.c : 0;
-  const totalPages = Math.ceil(totalItems / pageSize);
-
+  const mergedCte = `
+    WITH details_source AS (
+      SELECT
+        0 AS source_order,
+        id AS sort_id,
+        timestamp,
+        data,
+        NULL AS history_id,
+        provider,
+        model,
+        connectionId,
+        status,
+        NULL AS endpoint,
+        NULL AS promptTokens,
+        NULL AS completionTokens,
+        NULL AS cost,
+        NULL AS tokens,
+        CASE WHEN json_valid(data) THEN json_extract(data, '$.requestId') END AS request_key
+      FROM requestDetails
+      ${detailWhere}
+    ),
+    history_source AS (
+      SELECT
+        1 AS source_order,
+        CAST(id AS TEXT) AS sort_id,
+        timestamp,
+        NULL AS data,
+        id AS history_id,
+        provider,
+        model,
+        connectionId,
+        status,
+        endpoint,
+        promptTokens,
+        completionTokens,
+        cost,
+        tokens,
+        CASE WHEN json_valid(meta) THEN json_extract(meta, '$.requestId') END AS request_key
+      FROM usageHistory
+      ${historyWhere}
+    ),
+    history_without_reliable_duplicate AS (
+      SELECT h.*
+      FROM history_source h
+      WHERE h.request_key IS NULL
+         OR NOT EXISTS (
+           SELECT 1 FROM details_source d
+           WHERE d.request_key IS NOT NULL
+             AND d.request_key = h.request_key
+         )
+    ),
+    merged AS (
+      SELECT * FROM details_source
+      UNION ALL
+      SELECT * FROM history_without_reliable_duplicate
+    )
+  `;
+  const queryParams = [...detailParams, ...historyParams];
+  const count = db.get(
+    `${mergedCte}
+     SELECT COUNT(*) AS totalItems,
+            SUM(CASE WHEN source_order = 0 THEN 1 ELSE 0 END) AS detailItems,
+            SUM(CASE WHEN source_order = 1 THEN 1 ELSE 0 END) AS historyItems
+       FROM merged`,
+    queryParams,
+  ) || {};
+  const totalItems = Number(count.totalItems) || 0;
   const rows = db.all(
-    `SELECT id, timestamp, provider, model, connectionId, status, endpoint,
-            promptTokens, completionTokens, cost, tokens
-       FROM usageHistory ${historyWhere}
-      ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`,
-    [...historyParams, pageSize, offset]
+    `${mergedCte}
+     SELECT source_order, sort_id, timestamp, data, history_id, provider, model,
+            connectionId, status, endpoint, promptTokens, completionTokens, cost, tokens
+       FROM merged
+      ORDER BY timestamp DESC, source_order ASC, sort_id DESC
+      LIMIT ? OFFSET ?`,
+    [...queryParams, pageSize, offset],
   );
+
   const details = rows.map((row) => {
+    if (Number(row.source_order) === 0) {
+      const item = parseJson(row.data, {});
+      // Keep corrupt rows as the historical {} fallback so the details drawer
+      // remains crash-safe; valid rows are explicitly source-labelled.
+      if (item && typeof item === "object" && Object.keys(item).length > 0) item.source ||= "requestDetails";
+      return item;
+    }
     const tokens = parseJson(row.tokens, {}) || {};
     if (tokens.prompt_tokens === undefined && tokens.input_tokens === undefined) {
       tokens.prompt_tokens = row.promptTokens || 0;
@@ -236,7 +292,7 @@ export async function getRequestDetails(filter = {}) {
       tokens.completion_tokens = row.completionTokens || 0;
     }
     return {
-      id: `usage-${row.id}`,
+      id: `usage-${row.history_id}`,
       timestamp: row.timestamp,
       provider: row.provider,
       model: row.model,
@@ -251,11 +307,15 @@ export async function getRequestDetails(filter = {}) {
       source: "usageHistory",
     };
   });
+  const source = Number(count.detailItems) > 0 && Number(count.historyItems) > 0
+    ? "merged"
+    : (Number(count.historyItems) > 0 ? "usageHistory" : "requestDetails");
+  const totalPages = Math.ceil(totalItems / pageSize);
 
   return {
     details,
     pagination: { page, pageSize, totalItems, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
-    source: "usageHistory",
+    source,
   };
 }
 

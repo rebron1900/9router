@@ -10,6 +10,7 @@ const originalDataDir = process.env.DATA_DIR;
 let tempDir;
 let db;
 let adapter;
+let requestDetailHelpers;
 
 async function saveDetail(detail) {
   await db.saveRequestDetail(detail);
@@ -21,6 +22,7 @@ beforeAll(async () => {
   process.env.DATA_DIR = tempDir;
   vi.resetModules();
   db = await import("@/lib/db/index.js");
+  requestDetailHelpers = await import("../../open-sse/handlers/chatCore/requestDetail.js");
   await db.initDb();
   await db.updateSettings({ enableObservability: true, observabilityBatchSize: 1 });
 
@@ -59,6 +61,86 @@ describe("request details — tab crash-risk cases", () => {
     expect(successful.details).toHaveLength(1);
   });
 
+  it("merges older request details with newer usage history without duplicating a request", async () => {
+    adapter.run("DELETE FROM requestDetails");
+    adapter.run("DELETE FROM usageHistory");
+    const detailTime = "2030-01-01T00:00:00.000Z";
+    const newerTime = "2030-01-01T01:00:00.000Z";
+    adapter.run(
+      `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data)
+       VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      ["merge-detail", detailTime, "merge-provider", "merge-model", "merge-account", "ok", JSON.stringify({
+        id: "merge-detail",
+        timestamp: detailTime,
+        provider: "merge-provider",
+        model: "merge-model",
+        connectionId: "merge-account",
+        status: "ok",
+        tokens: { prompt_tokens: 12, completion_tokens: 5 },
+        requestId: "merge-request-1",
+      })],
+    );
+    // This is the same request written by both stores; it should be kept only
+    // once, with the richer requestDetails representation preferred.
+    adapter.run(
+      `INSERT INTO usageHistory(timestamp, provider, model, connectionId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["2030-01-01T00:00:01.000Z", "merge-provider", "merge-model", "merge-account", "/v1/chat/completions", 12, 5, 0, "ok", "{}", JSON.stringify({ requestId: "merge-request-1" })],
+    );
+    adapter.run(
+      `INSERT INTO usageHistory(timestamp, provider, model, connectionId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newerTime, "merge-provider", "merge-model", "merge-account", "/v1/chat/completions", 20, 8, 0, "ok", "{}", "{}"],
+    );
+
+    const res = await db.getRequestDetails({ provider: "merge-provider", model: "merge-model", page: 1, pageSize: 20 });
+    expect(res.source).toBe("merged");
+    expect(res.pagination.totalItems).toBe(2);
+    expect(res.details.map((item) => item.source)).toEqual(["usageHistory", "requestDetails"]);
+    expect(res.details[0].timestamp).toBe(newerTime);
+  });
+
+  it("dedupes production helper writes with the generated correlation ID", async () => {
+    adapter.run("DELETE FROM requestDetails");
+    adapter.run("DELETE FROM usageHistory");
+
+    const requestId = requestDetailHelpers.createRequestCorrelationId();
+    await db.saveRequestDetail(requestDetailHelpers.buildRequestDetail({
+      requestId,
+      provider: "helper-provider",
+      model: "helper-model",
+      connectionId: "helper-account",
+      tokens: { prompt_tokens: 12, completion_tokens: 5 },
+      request: { messages: [] },
+      response: { content: "richer detail" },
+      status: "success",
+    }, { id: "helper-detail" }));
+
+    await requestDetailHelpers.saveUsageStats({
+      requestId,
+      provider: "helper-provider",
+      model: "helper-model",
+      connectionId: "helper-account",
+      tokens: { prompt_tokens: 12, completion_tokens: 5 },
+      endpoint: "/v1/chat/completions",
+      silent: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const usageRow = adapter.get("SELECT meta FROM usageHistory WHERE provider = ?", ["helper-provider"]);
+    expect(JSON.parse(usageRow.meta)).toMatchObject({ requestId });
+
+    const res = await db.getRequestDetails({ provider: "helper-provider", model: "helper-model" });
+    expect(res.pagination.totalItems).toBe(1);
+    expect(res.details).toHaveLength(1);
+    expect(res.details[0]).toMatchObject({
+      id: "helper-detail",
+      source: "requestDetails",
+      requestId,
+      response: { content: "richer detail" },
+    });
+  });
+
   it("corrupt data column → parseJson fallback {}, no throw", async () => {
     // Inject a row with invalid JSON directly, bypassing save path
     adapter.run(
@@ -78,6 +160,67 @@ describe("request details — tab crash-risk cases", () => {
     expect(res.pagination.page).toBe(9999);
     expect(res.pagination.hasNext).toBe(false);
     expect(res.pagination.totalItems).toBeGreaterThanOrEqual(0);
+  });
+
+  it("does not dedupe two legitimate matching requests without a reliable request key", async () => {
+    adapter.run("DELETE FROM requestDetails");
+    adapter.run("DELETE FROM usageHistory");
+    const first = "2031-01-01T00:00:00.000Z";
+    const second = "2031-01-01T00:00:04.000Z";
+    for (const timestamp of [first, second]) {
+      adapter.run(
+        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+        [timestamp, "same-provider", "same-model", "same-account", "/v1/chat/completions", 12, 5, 0, "ok", "{}", "{}"],
+      );
+    }
+    const res = await db.getRequestDetails({ provider: "same-provider", pageSize: 20 });
+    expect(res.pagination.totalItems).toBe(2);
+    expect(res.details).toHaveLength(2);
+  });
+
+  it("keeps same-shaped production usage rows with different correlation IDs", async () => {
+    adapter.run("DELETE FROM requestDetails");
+    adapter.run("DELETE FROM usageHistory");
+    const entry = {
+      provider: "independent-provider",
+      model: "independent-model",
+      connectionId: "same-account",
+      endpoint: "/v1/chat/completions",
+      tokens: { prompt_tokens: 12, completion_tokens: 5 },
+      status: "ok",
+    };
+    const sameTimestamp = "2033-01-01T00:00:00.000Z";
+    await db.saveRequestUsage({ ...entry, requestId: "correlation-a", timestamp: sameTimestamp });
+    await db.saveRequestUsage({ ...entry, requestId: "correlation-b", timestamp: sameTimestamp });
+
+    const res = await db.getRequestDetails({ provider: "independent-provider", model: "independent-model", pageSize: 20 });
+    expect(res.pagination.totalItems).toBe(2);
+    expect(res.details).toHaveLength(2);
+  });
+
+  it("pages in SQL and does not read all history rows into JavaScript", async () => {
+    adapter.run("DELETE FROM requestDetails");
+    adapter.run("DELETE FROM usageHistory");
+    for (let i = 0; i < 250; i += 1) {
+      adapter.run(
+        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+        [`2032-01-01T00:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`, "paged-provider", "paged-model", `account-${i}`, "/v1/chat/completions", i + 1, 2, 0, "ok", "{}", "{}"],
+      );
+    }
+
+    const allSpy = vi.spyOn(adapter, "all");
+    try {
+      const res = await db.getRequestDetails({ provider: "paged-provider", page: 8, pageSize: 10 });
+      expect(res.details).toHaveLength(10);
+      expect(res.pagination.totalItems).toBe(250);
+      const pageSql = allSpy.mock.calls.map(([sql]) => String(sql)).find((sql) => /LIMIT \?\s+OFFSET \?/i.test(sql));
+      expect(pageSql).toBeDefined();
+      expect(pageSql).not.toMatch(/SELECT data FROM requestDetails/i);
+    } finally {
+      allSpy.mockRestore();
+    }
   });
 
   it("invalid startDate → Invalid Date ISO throws inside getRequestDetails is caught upstream", async () => {

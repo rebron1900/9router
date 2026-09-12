@@ -43,8 +43,8 @@ export {
   getStandardModels, getStandardModelById, getStandardModelByName,
   createStandardModel, updateStandardModel, deleteStandardModel,
   reorderStandardModels,
-  getStandardModelBindings, createStandardModelBinding,
-  updateStandardModelBinding, deleteStandardModelBinding,
+  getStandardModelBindings, createStandardModelBinding, createStandardModelBindingWithMappings,
+  updateStandardModelBinding, updateStandardModelBindingWithMappings, deleteStandardModelBinding,
   replaceStandardModelMappings,
 } from "./repos/standardModelsRepo.js";
 

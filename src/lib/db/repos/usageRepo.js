@@ -249,32 +249,47 @@ export async function saveRequestUsage(entry) {
     const tokens = entry.tokens || {};
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
+    const meta = (() => {
+      if (entry.meta && typeof entry.meta === "object" && !Array.isArray(entry.meta)) return { ...entry.meta };
+      if (typeof entry.meta === "string") return parseJson(entry.meta, {}) || {};
+      return {};
+    })();
+    if (entry.requestId) meta.requestId = entry.requestId;
 
     let inserted = false;
 
     // All 3 writes (history insert, daily upsert, lifetime counter) in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
     db.transaction(() => {
-      const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
-         WHERE timestamp = ?
-           AND COALESCE(provider, '') = COALESCE(?, '')
-           AND COALESCE(model, '') = COALESCE(?, '')
-           AND COALESCE(connectionId, '') = COALESCE(?, '')
-           AND COALESCE(apiKey, '') = COALESCE(?, '')
-           AND promptTokens = ?
-           AND completionTokens = ?
-         ORDER BY id DESC LIMIT 1`,
-        [
-          entry.timestamp, entry.provider || null, entry.model || null,
-          entry.connectionId || null, entry.apiKey || null,
-          promptTokens, completionTokens,
-        ]
-      );
+      const existing = entry.requestId
+        ? db.get(
+          `SELECT id, endpoint, meta FROM usageHistory
+           WHERE json_valid(meta) AND json_extract(meta, '$.requestId') = ?
+           ORDER BY id DESC LIMIT 1`,
+          [entry.requestId],
+        )
+        : db.get(
+          `SELECT id, endpoint, meta FROM usageHistory
+           WHERE timestamp = ?
+             AND COALESCE(provider, '') = COALESCE(?, '')
+             AND COALESCE(model, '') = COALESCE(?, '')
+             AND COALESCE(connectionId, '') = COALESCE(?, '')
+             AND COALESCE(apiKey, '') = COALESCE(?, '')
+             AND promptTokens = ?
+             AND completionTokens = ?
+           ORDER BY id DESC LIMIT 1`,
+          [
+            entry.timestamp, entry.provider || null, entry.model || null,
+            entry.connectionId || null, entry.apiKey || null,
+            promptTokens, completionTokens,
+          ],
+        );
 
       if (existing) {
-        if (!existing.endpoint && entry.endpoint) {
-          db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
+        const existingMeta = parseJson(existing.meta, {}) || {};
+        const nextMeta = Object.keys(meta).length > 0 ? { ...existingMeta, ...meta } : existingMeta;
+        if ((!existing.endpoint && entry.endpoint) || Object.keys(meta).length > 0) {
+          db.run(`UPDATE usageHistory SET endpoint = COALESCE(endpoint, ?), meta = ? WHERE id = ?`, [entry.endpoint || null, stringifyJson(nextMeta), existing.id]);
         }
         return;
       }
@@ -285,7 +300,7 @@ export async function saveRequestUsage(entry) {
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
+           stringifyJson(tokens), stringifyJson(meta),
         ]
       );
 

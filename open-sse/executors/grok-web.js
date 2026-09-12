@@ -223,7 +223,7 @@ export class GrokWebExecutor extends BaseExecutor {
     super("grok-web", PROVIDERS["grok-web"]);
   }
 
-  async execute({ model, body, stream, credentials, signal, log }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const messages = body?.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       const errResp = new Response(JSON.stringify({
@@ -294,9 +294,19 @@ export class GrokWebExecutor extends BaseExecutor {
     let response;
     try {
       response = await fetch(GROK_CHAT_API, {
-        method: "POST", headers, body: JSON.stringify(grokPayload), signal,
+        method: "POST",
+        headers,
+        body: JSON.stringify(grokPayload),
+        signal,
+        attemptBudget: proxyOptions?.attemptBudget || null,
+        attemptProvider: "grok-web",
+        attemptModel: model,
       });
     } catch (err) {
+      const routeBudget = proxyOptions?.attemptBudget;
+      if (routeBudget && (routeBudget.isBudgetError?.(err) || routeBudget.snapshot?.().timedOut || err?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw routeBudget.error();
+      }
       log?.error?.("GROK-WEB", `Fetch failed: ${err.message || String(err)}`);
       const errResp = new Response(JSON.stringify({
         error: { message: `Grok connection failed: ${err.message || String(err)}`, type: "upstream_error" },

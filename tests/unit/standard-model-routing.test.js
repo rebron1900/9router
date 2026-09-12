@@ -8,6 +8,7 @@ import {
   buildStandardRouteErrorResponse,
   classifyStandardRouteFailure,
   createStandardRouteBudget,
+  cleanupStandardResponseAffinities,
   extractStandardResponseIdFromChunk,
   getStandardResponseAffinity,
   getStandardProviderHealth,
@@ -18,6 +19,7 @@ import {
   recordStandardProviderSuccess,
   resetStandardResponseAffinities,
   resetStandardProviderHealth,
+  STANDARD_RESPONSE_AFFINITY_MAX_ENTRIES,
 } from "../../src/lib/standardModels/runtime.js";
 
 const log = {
@@ -116,6 +118,22 @@ describe("standard model route runtime", () => {
     expect(getStandardResponseAffinity("resp_1", () => 100000 + 30 * 60 * 1000 + 1)).toBeNull();
   });
 
+  it("purges expired affinities and bounds the in-memory table", () => {
+    const now = () => 200000;
+    for (let i = 0; i < STANDARD_RESPONSE_AFFINITY_MAX_ENTRIES + 1; i++) {
+      expect(recordStandardResponseAffinity(`resp-cap-${i}`, {
+        standardModelId: "standard-1",
+        providerId: "provider-a",
+        upstreamModelId: "model-a",
+      }, now)).toBe(true);
+    }
+
+    // Insertion order is the eviction order, so the oldest entry is removed.
+    expect(getStandardResponseAffinity("resp-cap-0", now)).toBeNull();
+    expect(getStandardResponseAffinity(`resp-cap-${STANDARD_RESPONSE_AFFINITY_MAX_ENTRIES}`, now)).not.toBeNull();
+    expect(cleanupStandardResponseAffinities(() => now() + 30 * 60 * 1000 + 1)).toBe(0);
+  });
+
   it("extracts a Responses response ID from an SSE data chunk", () => {
     const chunk = new TextEncoder().encode(
       'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_42"}}\n\n'
@@ -177,6 +195,67 @@ describe("standard model route runtime", () => {
     expect(await response.json()).toMatchObject({ ok: true, provider: "provider-b/model-b" });
   });
 
+  it("falls back on an upstream socket reset when no client abort signal exists", async () => {
+    const tried = [];
+    const response = await handleComboChat({
+      body: { stream: false },
+      models: ["provider-a/model-a", "provider-b/model-b"],
+      handleSingleModel: async (_body, model) => {
+        tried.push(model);
+        if (model.startsWith("provider-a/")) {
+          return new Response(JSON.stringify({ error: { message: "fetch failed (UND_ERR_SOCKET)" } }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+      log,
+      comboName: "standard:socket-reset",
+      comboStrategy: "fallback",
+      autoSwitch: false,
+      failureClassifier: ({ status, errorText }) => ({
+        ...classifyStandardRouteFailure({ status, error: errorText }),
+        cooldownMs: 0,
+      }),
+    });
+
+    expect(tried).toEqual(["provider-a/model-a", "provider-b/model-b"]);
+    expect(response.status).toBe(200);
+  });
+
+  it("does not report a committed deferred heartbeat as provider success", async () => {
+    const onAttemptResult = vi.fn();
+    let settleDeferred;
+    const deferred = new Promise((resolve) => { settleDeferred = resolve; });
+    const provisional = new Response("\n{}", { status: 200 });
+    Object.defineProperty(provisional, "__9routerDeferredOutcome", {
+      value: deferred,
+    });
+
+    const response = await handleComboChat({
+      body: { stream: false },
+      models: ["provider-a/model-a"],
+      handleSingleModel: async () => provisional,
+      log,
+      comboName: "standard:deferred",
+      comboStrategy: "fallback",
+      autoSwitch: false,
+      failureClassifier: ({ status, errorText }) => ({
+        ...classifyStandardRouteFailure({ status, error: errorText }),
+        cooldownMs: 0,
+      }),
+      onAttemptResult,
+    });
+
+    expect(response).toBe(provisional);
+    expect(onAttemptResult).not.toHaveBeenCalled();
+    settleDeferred({ success: false, status: 503, error: "provider overloaded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onAttemptResult).toHaveBeenCalledOnce();
+    expect(onAttemptResult).toHaveBeenCalledWith(expect.objectContaining({ ok: false, deferred: true, status: 503 }));
+  });
+
   it("returns structured route failures when all candidates fail", async () => {
     const response = buildStandardRouteErrorResponse({
       status: 503,
@@ -213,5 +292,36 @@ describe("standard model route runtime", () => {
       "luna",
       "luna-thinking",
     ]);
+  });
+
+  it("filters capability conflicts per mapping while keeping compatible mappings on the same binding", () => {
+    const plan = planStandardModelCandidates({
+      model: { id: "standard-vision", publicName: "vision", requiredCapabilities: { vision: true } },
+      bindings: [{
+        id: "binding-a",
+        providerId: "provider-a",
+        mappings: [
+          { id: "text", upstreamModelId: "text-only", capabilityOverrides: { vision: false } },
+          { id: "vision", upstreamModelId: "vision-model", capabilityOverrides: { vision: true } },
+        ],
+      }],
+    });
+
+    expect(plan.candidates.map((candidate) => candidate.upstreamModelId)).toEqual(["vision-model"]);
+    expect(plan.candidates[0].capabilityOverrides).toEqual({ vision: true });
+  });
+
+  it("reports capability mismatch when every mapping conflicts", () => {
+    const plan = planStandardModelCandidates({
+      model: { id: "standard-vision", requiredCapabilities: { vision: true } },
+      bindings: [{
+        id: "binding-a",
+        providerId: "provider-a",
+        mappings: [{ upstreamModelId: "text-only", capabilityOverrides: { vision: false } }],
+      }],
+    });
+
+    expect(plan.candidates).toHaveLength(0);
+    expect(plan.excluded).toEqual([{ providerId: "provider-a", reason: "capability_mismatch" }]);
   });
 });

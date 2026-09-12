@@ -135,7 +135,6 @@ export function unavailableResponse(statusCode, message, retryAfter, retryAfterH
 // `ResponseAborted` — whose `message` is empty, so matching the text alone is
 // not enough either. Callers must not cool down or fail over an account for a
 // request the client itself cancelled.
-const CLIENT_DISCONNECT_NAMES = new Set(["AbortError", "ResponseAborted"]);
 const CLIENT_DISCONNECT_CODES = new Set([
   "ECONNRESET",
   "EPIPE",
@@ -156,10 +155,19 @@ const CLIENT_DISCONNECT_MESSAGE_PATTERNS = [
  * keep the message). Walks a bounded `cause` chain, because fetch/stream
  * wrappers nest the real error one or two levels down.
  * @param {Error|object|string|null|undefined} error
+ * @param {object} [context]
+ * @param {AbortSignal} [context.requestSignal] - The real client request signal.
+ * @param {boolean} [context.responseAborted] - Explicit downstream response-abort context.
  * @returns {boolean}
  */
-export function isClientDisconnect(error) {
+export function isClientDisconnect(error, { requestSignal = null, responseAborted = false } = {}) {
   if (error === undefined || error === null) return false;
+
+  // Direction-ambiguous transport errors are only client disconnects when the
+  // request/response lifecycle gives us that direction.  ECONNRESET and
+  // UND_ERR_SOCKET are also normal provider/proxy failures, so their code alone
+  // must never turn a retryable 502 into a 499.
+  const requestAborted = requestSignal?.aborted === true;
 
   const candidates = [];
   if (typeof error === "string") {
@@ -176,10 +184,17 @@ export function isClientDisconnect(error) {
   }
 
   for (const candidate of candidates) {
-    if (typeof candidate?.name === "string" && CLIENT_DISCONNECT_NAMES.has(candidate.name)) return true;
-    if (typeof candidate?.code === "string" && CLIENT_DISCONNECT_CODES.has(candidate.code)) return true;
+    if (candidate?.clientDisconnect === true) return true;
+    // Next.js/undici may surface ResponseAborted with an empty message before
+    // the stream controller has observed the downstream close. The request
+    // signal is still authoritative in that race; require one explicit
+    // downstream context, never the error name alone.
+    if (candidate?.name === "ResponseAborted" && (requestAborted || responseAborted)) return true;
+    if (candidate?.name === "AbortError" && requestAborted) return true;
+    if (typeof candidate?.code === "string" && CLIENT_DISCONNECT_CODES.has(candidate.code) && (requestAborted || responseAborted)) return true;
     const message = typeof candidate?.message === "string" ? candidate.message.toLowerCase() : "";
-    if (message && CLIENT_DISCONNECT_MESSAGE_PATTERNS.some((pattern) => message.includes(pattern))) return true;
+    if (message && (message.includes("client disconnect") || message.includes("aborted by client") || message.includes("client closed"))) return true;
+    if (responseAborted && message && CLIENT_DISCONNECT_MESSAGE_PATTERNS.some((pattern) => message.includes(pattern))) return true;
   }
   return false;
 }

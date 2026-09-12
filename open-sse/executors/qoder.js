@@ -573,6 +573,10 @@ export class QoderExecutor extends BaseExecutor {
       try {
         credentials = await resolveQoderCredentials(credentials, proxyOptions, signal);
       } catch (err) {
+        const routeBudget = proxyOptions?.attemptBudget;
+        if (routeBudget && (routeBudget.isBudgetError?.(err) || routeBudget.snapshot?.().timedOut || err?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+          throw routeBudget.error();
+        }
         log?.error?.("QODER", `PAT exchange failed: ${err.message}`);
         const fakeResp = new Response(
           JSON.stringify({ error: { message: `qoder PAT exchange failed: ${err.message}` } }),
@@ -608,6 +612,10 @@ export class QoderExecutor extends BaseExecutor {
     try {
       ({ qoderKey, payload } = await buildQoderRequestBody({ model, body, credentials, log, proxyOptions, signal }));
     } catch (err) {
+      const routeBudget = proxyOptions?.attemptBudget;
+      if (routeBudget && (routeBudget.isBudgetError?.(err) || routeBudget.snapshot?.().timedOut || err?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw routeBudget.error();
+      }
       const fakeResp = new Response(
         JSON.stringify({ error: { message: err.message } }),
         { status: 400, headers: { "Content-Type": "application/json" } },

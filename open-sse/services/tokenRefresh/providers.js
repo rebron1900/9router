@@ -199,7 +199,7 @@ export async function refreshClaudeOAuthToken(refreshToken, log) {
   return refreshAccessToken("claude", refreshToken, {}, log);
 }
 
-export async function refreshGoogleToken(refreshToken, clientId, clientSecret, log) {
+export async function refreshGoogleToken(refreshToken, clientId, clientSecret, log, requestOptions = {}) {
   if (!refreshToken) return null;
   return dedupRefresh(`google:${clientId}`, refreshToken, async () => {
   try {
@@ -215,6 +215,10 @@ export async function refreshGoogleToken(refreshToken, clientId, clientSecret, l
         client_id: clientId,
         client_secret: clientSecret,
       }),
+      signal: requestOptions.signal,
+      attemptBudget: requestOptions.attemptBudget || null,
+      attemptProvider: requestOptions.provider || "google-token",
+      attemptModel: requestOptions.model || "",
     });
 
     if (!response.ok) {
@@ -227,6 +231,12 @@ export async function refreshGoogleToken(refreshToken, clientId, clientSecret, l
     log?.info?.("TOKEN_REFRESH", "Successfully refreshed Google token", { hasNewAccessToken: !!tokens.access_token, expiresIn: tokens.expires_in });
     return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || refreshToken, expiresIn: tokens.expires_in };
   } catch (error) {
+    const routeBudget = requestOptions.attemptBudget;
+    if (routeBudget && (routeBudget.isBudgetError?.(error)
+      || routeBudget.snapshot?.().timedOut
+      || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+      throw routeBudget.error();
+    }
     log?.error?.("TOKEN_REFRESH", `Network error refreshing Google token: ${error.message}`);
     return null;
   }

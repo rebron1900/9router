@@ -21,6 +21,26 @@ export function extractRequestConfig(body, stream) {
   return config;
 }
 
+// Keep this correlation ID owned by 9router rather than reusing a provider
+// request ID, session ID, or response ID.  globalThis.crypto is available in
+// both Node and Worker runtimes; the fallback keeps older runtimes usable.
+export function createRequestCorrelationId() {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+      return `req_${globalThis.crypto.randomUUID()}`;
+    }
+  } catch { /* use the portable fallback below */ }
+
+  const randomPart = typeof globalThis.crypto?.getRandomValues === "function"
+    ? (() => {
+        const bytes = new Uint8Array(16);
+        globalThis.crypto.getRandomValues(bytes);
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      })()
+    : Math.random().toString(36).slice(2);
+  return `req_${Date.now().toString(36)}_${randomPart}`;
+}
+
 export function extractUsageFromResponse(responseBody) {
   if (!responseBody || typeof responseBody !== "object") return null;
 
@@ -66,6 +86,7 @@ export function extractUsageFromResponse(responseBody) {
 
 export function buildRequestDetail(base, overrides = {}) {
   return {
+    requestId: base.requestId || undefined,
     provider: base.provider || "unknown",
     model: base.model || "unknown",
     connectionId: base.connectionId || undefined,
@@ -100,7 +121,7 @@ export function formatDoneLine({ usage, latency }) {
   return `DONE ${latency?.total ?? 0}ms${ttftStr} · ${inStr} · OUT ${outTok}`;
 }
 
-export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false }) {
+export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, requestId, label = "USAGE", silent = false }) {
   if (!tokens || typeof tokens !== "object") return;
 
   const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
@@ -121,13 +142,14 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
   };
 
-  saveRequestUsage({
+  return saveRequestUsage({
     provider: provider || "unknown",
     model: model || "unknown",
     tokens: normalized,
     timestamp: new Date().toISOString(),
     connectionId: connectionId || undefined,
     apiKey: apiKey || undefined,
-    endpoint: endpoint || null
+    endpoint: endpoint || null,
+    requestId: requestId || undefined,
   }).catch(() => {});
 }

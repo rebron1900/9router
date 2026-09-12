@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import {
   getStandardModelById,
   getStandardModelBindings,
-  createStandardModelBinding,
-  replaceStandardModelMappings,
+  createStandardModelBindingWithMappings,
 } from "@/lib/localDb";
 import { normalizeBindingInput, normalizeMappings } from "@/lib/standardModels/service";
 
@@ -22,9 +21,11 @@ export async function POST(request, { params }) {
     const model = await getStandardModelById(id);
     if (!model) return NextResponse.json({ error: "Standard model not found" }, { status: 404 });
     const body = await request.json();
-    const binding = await createStandardModelBinding(id, normalizeBindingInput(body));
-    const mappings = normalizeMappings(body.mappings);
-    if (mappings.length) await replaceStandardModelMappings(binding.id, mappings);
+    const binding = await createStandardModelBindingWithMappings(
+      id,
+      normalizeBindingInput(body),
+      normalizeMappings(body.mappings),
+    );
     return NextResponse.json({ binding, providers: await getStandardModelBindings(id) }, { status: 201 });
   } catch (error) {
     const message = error?.message || "Failed to add provider binding";

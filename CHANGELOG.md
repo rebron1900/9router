@@ -1,3 +1,12 @@
+# v0.5.76 (2026-09-12)
+
+## Fixes
+- **Streaming**: keep long forced-stream JSON requests alive without delaying response headers, preserve delayed upstream errors, and report deferred routing outcomes accurately
+- **Routing**: distinguish client disconnects from provider resets, enforce request-wide attempt/deadline budgets through retries and response streams, and filter capabilities per provider mapping
+- **Standard models**: update provider bindings and mappings atomically; bound and expire response affinity state
+- **Usage**: correlate detail and usage records with request ids, deduplicate reliably, and page merged history in SQLite instead of loading full tables
+- **Build**: publish Docker images for both linux/amd64 and linux/arm64
+
 # v0.5.75 (2026-09-10)
 
 ## Features

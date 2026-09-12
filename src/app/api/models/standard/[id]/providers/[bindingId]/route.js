@@ -2,9 +2,8 @@ import { NextResponse } from "next/server";
 import {
   getStandardModelById,
   getStandardModelBindings,
-  updateStandardModelBinding,
+  updateStandardModelBindingWithMappings,
   deleteStandardModelBinding,
-  replaceStandardModelMappings,
 } from "@/lib/localDb";
 import { normalizeBindingInput, normalizeMappings } from "@/lib/standardModels/service";
 
@@ -22,11 +21,11 @@ export async function PATCH(request, { params }) {
     if (!await getBinding(id, bindingId)) return NextResponse.json({ error: "Provider binding not found" }, { status: 404 });
     const body = await request.json();
     const current = await getBinding(id, bindingId);
-    const binding = await updateStandardModelBinding(
+    const binding = await updateStandardModelBindingWithMappings(
       bindingId,
       normalizeBindingInput({ ...current, ...body }),
+      Array.isArray(body.mappings) ? normalizeMappings(body.mappings) : undefined,
     );
-    if (Array.isArray(body.mappings)) await replaceStandardModelMappings(bindingId, normalizeMappings(body.mappings));
     return NextResponse.json({ binding, mappings: await getBinding(id, bindingId) });
   } catch (error) {
     const message = error?.message || "Failed to update provider binding";

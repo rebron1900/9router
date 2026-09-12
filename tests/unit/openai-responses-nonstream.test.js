@@ -147,6 +147,7 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
       const providerResponse = new Response(new ReadableStream({
         start(controller) {
           upstreamController = controller;
+          controller.enqueue(encoder.encode('{"type":"start"}\n{"type":"start-step"}\n'));
         }
       }), { headers: { "content-type": "text/event-stream" } });
 
@@ -199,6 +200,82 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
       );
       expect(parsed.object).toBe("chat.completion");
       await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a delayed SSE error after the 200 heartbeat and reports deferred failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let upstreamController;
+      const resultPromise = handleForcedSSEToJson({
+        providerResponse: new Response(new ReadableStream({ start(controller) { upstreamController = controller; } }), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        provider: "op-test-chat",
+        model: "gpt-x",
+        body: { model: "gpt-x", messages: [] },
+        stream: false,
+        requestStartTime: Date.now(),
+        connectionId: "test-connection",
+        clientRawRequest: { endpoint: "/v1/chat/completions" },
+        trackDone: vi.fn(),
+        appendLog: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      const result = await resultPromise;
+      expect(result.deferred).toBe(true);
+      upstreamController.enqueue(encoder.encode([
+        'data: {"error":{"message":"provider overloaded","code":503}}',
+        "data: [DONE]",
+        "",
+      ].join("\n\n")));
+      upstreamController.close();
+
+      const body = await result.response.text();
+      expect(result.response.status).toBe(200);
+      expect(JSON.parse(body).error.message).toContain("provider overloaded");
+      await expect(result.deferredOutcome).resolves.toMatchObject({ success: false, status: 503 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a rejected buffered promise as a deferred 502 error instead of success", async () => {
+    vi.useFakeTimers();
+    try {
+      let upstreamController;
+      const resultPromise = handleForcedSSEToJson({
+        providerResponse: new Response(new ReadableStream({ start(controller) { upstreamController = controller; } }), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        provider: "op-test-chat",
+        model: "gpt-x",
+        body: { model: "gpt-x", messages: [] },
+        stream: false,
+        requestStartTime: Date.now(),
+        connectionId: "test-connection",
+        clientRawRequest: { endpoint: "/v1/chat/completions" },
+        trackDone: vi.fn(),
+        appendLog: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      const result = await resultPromise;
+      upstreamController.error(new Error("upstream stream rejected"));
+
+      const body = await result.response.text();
+      expect(result.response.status).toBe(200);
+      expect(JSON.parse(body).error.message).toContain("Failed to convert streaming response");
+      expect(JSON.parse(body).error.message).toContain("upstream stream rejected");
+      await expect(result.deferredOutcome).resolves.toMatchObject({ success: false, status: 502 });
     } finally {
       vi.useRealTimers();
     }

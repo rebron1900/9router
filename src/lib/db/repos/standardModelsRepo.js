@@ -247,6 +247,73 @@ export async function createStandardModelBinding(standardModelId, data) {
   return binding;
 }
 
+function normalizeStoredMappings(bindingId, mappings, now = new Date().toISOString()) {
+  const normalized = (Array.isArray(mappings) ? mappings : []).map((mapping) => ({
+    id: mapping.id || uuidv4(),
+    providerBindingId: bindingId,
+    upstreamModelId: String(mapping.upstreamModelId || "").trim(),
+    enabled: bool(mapping.enabled),
+    mappingPriority: Math.max(1, Number(mapping.mappingPriority) || 1),
+    requestFormats: Array.isArray(mapping.requestFormats) ? mapping.requestFormats.filter(Boolean) : [],
+    operations: Array.isArray(mapping.operations) ? mapping.operations.filter(Boolean) : [],
+    capabilityOverrides: mapping.capabilityOverrides || {},
+    createdAt: mapping.createdAt || now,
+    updatedAt: now,
+  }));
+  if (normalized.some((mapping) => !mapping.upstreamModelId)) throw new Error("upstreamModelId is required");
+  return normalized;
+}
+
+function insertStandardModelMappings(db, bindingId, mappings, now = new Date().toISOString()) {
+  const normalized = normalizeStoredMappings(bindingId, mappings, now);
+  db.run(`DELETE FROM standardModelMappings WHERE providerBindingId = ?`, [bindingId]);
+  for (const mapping of normalized) {
+    db.run(
+      `INSERT INTO standardModelMappings
+        (id, providerBindingId, upstreamModelId, enabled, mappingPriority, requestFormats, operations, capabilityOverrides, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [mapping.id, bindingId, mapping.upstreamModelId, mapping.enabled ? 1 : 0, mapping.mappingPriority,
+        stringifyJson(mapping.requestFormats), stringifyJson(mapping.operations), stringifyJson(mapping.capabilityOverrides),
+        mapping.createdAt, mapping.updatedAt],
+    );
+  }
+  return normalized;
+}
+
+/**
+ * Create a provider binding and its mappings in one SQLite transaction.  The
+ * route layer must use this when a request contains both parts; otherwise a
+ * mapping validation/constraint error can leave an orphan binding behind.
+ */
+export async function createStandardModelBindingWithMappings(standardModelId, data, mappings = []) {
+  const db = await getAdapter();
+  const now = new Date().toISOString();
+  const binding = {
+    id: data.id || uuidv4(),
+    standardModelId,
+    providerId: data.providerId,
+    enabled: bool(data.enabled),
+    priority: Math.max(1, Number(data.priority) || 1),
+    data: data.data || {},
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.transaction(() => {
+    // Validate before the first write so malformed payloads are cheap, while
+    // the transaction still protects uniqueness/foreign-key/constraint errors.
+    const normalized = normalizeStoredMappings(binding.id, mappings, now);
+    db.run(
+      `INSERT INTO standardModelProviders
+        (id, standardModelId, providerId, enabled, priority, weight, data, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [binding.id, binding.standardModelId, binding.providerId, binding.enabled ? 1 : 0,
+        binding.priority, 100, stringifyJson(binding.data), binding.createdAt, binding.updatedAt],
+    );
+    insertStandardModelMappings(db, binding.id, normalized, now);
+  });
+  return binding;
+}
+
 export async function updateStandardModelBinding(id, data) {
   const db = await getAdapter();
   let result = null;
@@ -269,6 +336,30 @@ export async function updateStandardModelBinding(id, data) {
   return result;
 }
 
+/** Update a binding and replace its mappings atomically when mappings are supplied. */
+export async function updateStandardModelBindingWithMappings(id, data, mappings) {
+  const db = await getAdapter();
+  let result = null;
+  db.transaction(() => {
+    const row = db.get(`SELECT * FROM standardModelProviders WHERE id = ?`, [id]);
+    if (!row) return;
+    const current = rowToBinding(row);
+    const merged = {
+      ...current,
+      ...data,
+      priority: Math.max(1, Number(data.priority ?? current.priority) || 1),
+      updatedAt: new Date().toISOString(),
+    };
+    db.run(
+      `UPDATE standardModelProviders SET providerId = ?, enabled = ?, priority = ?, weight = ?, data = ?, updatedAt = ? WHERE id = ?`,
+      [merged.providerId, merged.enabled ? 1 : 0, merged.priority, 100, stringifyJson(merged.data || {}), merged.updatedAt, id],
+    );
+    if (Array.isArray(mappings)) insertStandardModelMappings(db, id, mappings, merged.updatedAt);
+    result = merged;
+  });
+  return result;
+}
+
 export async function deleteStandardModelBinding(id) {
   const db = await getAdapter();
   let deleted = false;
@@ -283,31 +374,9 @@ export async function deleteStandardModelBinding(id) {
 export async function replaceStandardModelMappings(bindingId, mappings) {
   const db = await getAdapter();
   const now = new Date().toISOString();
-  const normalized = (Array.isArray(mappings) ? mappings : []).map((mapping) => ({
-    id: mapping.id || uuidv4(),
-    providerBindingId: bindingId,
-    upstreamModelId: String(mapping.upstreamModelId || "").trim(),
-    enabled: bool(mapping.enabled),
-    mappingPriority: Math.max(1, Number(mapping.mappingPriority) || 1),
-    requestFormats: Array.isArray(mapping.requestFormats) ? mapping.requestFormats.filter(Boolean) : [],
-    operations: Array.isArray(mapping.operations) ? mapping.operations.filter(Boolean) : [],
-    capabilityOverrides: mapping.capabilityOverrides || {},
-    createdAt: mapping.createdAt || now,
-    updatedAt: now,
-  }));
-  if (normalized.some((mapping) => !mapping.upstreamModelId)) throw new Error("upstreamModelId is required");
+  const normalized = normalizeStoredMappings(bindingId, mappings, now);
   db.transaction(() => {
-    db.run(`DELETE FROM standardModelMappings WHERE providerBindingId = ?`, [bindingId]);
-    for (const mapping of normalized) {
-      db.run(
-        `INSERT INTO standardModelMappings
-          (id, providerBindingId, upstreamModelId, enabled, mappingPriority, requestFormats, operations, capabilityOverrides, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [mapping.id, bindingId, mapping.upstreamModelId, mapping.enabled ? 1 : 0, mapping.mappingPriority,
-          stringifyJson(mapping.requestFormats), stringifyJson(mapping.operations), stringifyJson(mapping.capabilityOverrides),
-          mapping.createdAt, mapping.updatedAt],
-      );
-    }
+    insertStandardModelMappings(db, bindingId, normalized, now);
   });
   return normalized;
 }

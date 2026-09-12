@@ -393,7 +393,7 @@ export class PerplexityWebExecutor extends BaseExecutor {
     super("perplexity-web", PROVIDERS["perplexity-web"]);
   }
 
-  async execute({ model, body, stream, credentials, signal, log }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const messages = body?.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       const errResp = new Response(JSON.stringify({
@@ -452,11 +452,18 @@ export class PerplexityWebExecutor extends BaseExecutor {
 
     const fetchOptions = { method: "POST", headers, body: JSON.stringify(pplxBody) };
     if (signal) fetchOptions.signal = signal;
+    fetchOptions.attemptBudget = proxyOptions?.attemptBudget || null;
+    fetchOptions.attemptProvider = "perplexity-web";
+    fetchOptions.attemptModel = model;
 
     let response;
     try {
       response = await fetch(PPLX_SSE_ENDPOINT, fetchOptions);
     } catch (err) {
+      const routeBudget = proxyOptions?.attemptBudget;
+      if (routeBudget && (routeBudget.isBudgetError?.(err) || routeBudget.snapshot?.().timedOut || err?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw routeBudget.error();
+      }
       log?.error?.("PPLX-WEB", `Fetch failed: ${err.message || String(err)}`);
       const errResp = new Response(JSON.stringify({
         error: { message: `Perplexity connection failed: ${err.message || String(err)}`, type: "upstream_error" },

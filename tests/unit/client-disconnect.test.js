@@ -13,21 +13,38 @@ describe("isClientDisconnect — the caller went away", () => {
     // message at all, so only the `name` identifies it.
     const err = named("ResponseAborted");
     expect(err.message).toBe("");
-    expect(isClientDisconnect(err)).toBe(true);
+    expect(isClientDisconnect(err, { responseAborted: true })).toBe(true);
   });
 
-  it("recognises AbortError", () => {
-    expect(isClientDisconnect(named("AbortError"))).toBe(true);
+  it("recognises AbortError only when the request signal actually aborted", () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(isClientDisconnect(named("AbortError"), { requestSignal: controller.signal })).toBe(true);
+    expect(isClientDisconnect(named("AbortError"))).toBe(false);
   });
 
-  it("recognises transport-level disconnect codes", () => {
+  it("recognises empty ResponseAborted when the real request signal is already aborted", () => {
+    const controller = new AbortController();
+    controller.abort();
+    // The stream controller can still report false in the abort/error race;
+    // the request signal is the explicit downstream context we can trust.
+    expect(isClientDisconnect(named("ResponseAborted"), { requestSignal: controller.signal })).toBe(true);
+    expect(isClientDisconnect(named("ResponseAborted"))).toBe(false);
+  });
+
+  it("requires client context for direction-ambiguous transport codes", () => {
+    const controller = new AbortController();
+    controller.abort();
     for (const code of ["ECONNRESET", "EPIPE", "ERR_STREAM_PREMATURE_CLOSE", "UND_ERR_SOCKET"]) {
-      expect(isClientDisconnect(Object.assign(new Error("x"), { code }))).toBe(true);
+      const error = Object.assign(new Error("x"), { code });
+      expect(isClientDisconnect(error)).toBe(false);
+      expect(isClientDisconnect(error, { requestSignal: controller.signal })).toBe(true);
     }
   });
 
   it("recognises disconnect wording", () => {
-    expect(isClientDisconnect(new Error("socket hang up"))).toBe(true);
+    expect(isClientDisconnect(new Error("socket hang up"))).toBe(false);
+    expect(isClientDisconnect(new Error("socket hang up"), { responseAborted: true })).toBe(true);
     expect(isClientDisconnect(new Error("Request aborted by client"))).toBe(true);
     expect(isClientDisconnect("client disconnect")).toBe(true);
   });
@@ -35,7 +52,7 @@ describe("isClientDisconnect — the caller went away", () => {
   it("looks through a nested cause", () => {
     const err = new Error("fetch failed");
     err.cause = named("ResponseAborted");
-    expect(isClientDisconnect(err)).toBe(true);
+    expect(isClientDisconnect(err, { responseAborted: true })).toBe(true);
   });
 
   it("does not treat real provider failures as disconnects", () => {
@@ -81,12 +98,12 @@ describe("classifyStandardRouteFailure — cancellation is not a health signal",
     expect(c.retryable).toBe(false);
   });
 
-  it("classifies a bare ResponseAborted string as cancelled", () => {
-    // The rewritten preflight message drops the word "aborted"; the error NAME
-    // is what has to carry the signal through.
+  it("does not classify a bare ResponseAborted string as client cancellation", () => {
+    // Without the real request/response abort context this may be an upstream
+    // reset, so standard routing must retain 502/fallback semantics.
     const c = classifyStandardRouteFailure({ status: 502, error: "ResponseAborted" });
-    expect(c.category).toBe("cancelled");
-    expect(c.healthEligible).toBe(false);
+    expect(c.category).toBe("transport");
+    expect(c.healthEligible).toBe(true);
   });
 
   it("still treats a real overload as retryable", () => {

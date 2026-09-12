@@ -209,14 +209,15 @@ class ZedExecutor extends BaseExecutor {
     super("zed");
   }
 
-  async resolveModel(model, credentials, signal, log) {
+  async resolveModel(model, credentials, signal, log, proxyOptions = null) {
     try {
-      const catalog = await resolveZedModels(credentials, { config: this.config, signal });
+      const catalog = await resolveZedModels(credentials, { config: this.config, signal, proxyOptions });
       let raw = catalog?.rawById?.get(model) ?? null;
       if (!raw) {
         const refreshed = await resolveZedModels(credentials, {
           config: this.config,
           signal,
+          proxyOptions,
           forceRefresh: true,
         });
         raw = refreshed?.rawById?.get(model) ?? null;
@@ -230,7 +231,7 @@ class ZedExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    const { provider } = await this.resolveModel(model, credentials, signal, log);
+    const { provider } = await this.resolveModel(model, credentials, signal, log, proxyOptions);
     const providerRequest = buildProviderRequest(provider, model, body, stream, credentials);
     const bodyRecord = body || {};
     const payload = {
@@ -256,6 +257,7 @@ class ZedExecutor extends BaseExecutor {
         },
         body: JSON.stringify(payload),
       },
+      proxyOptions,
     });
 
     const wrapped = response.ok ? wrapZedCompletionStream(response, provider, model) : response;

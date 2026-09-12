@@ -16,7 +16,7 @@ function getTimeString() {
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", externalSignal = null } = {}) {
+export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", externalSignal = null, clientSignal = null } = {}) {
   const abortController = new AbortController();
   const startTime = Date.now();
   let disconnected = false;
@@ -41,9 +41,11 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
 
   return {
     signal: abortController.signal,
+    clientSignal: clientSignal || externalSignal || null,
     startTime,
 
     isConnected: () => !disconnected,
+    wasClientDisconnected: () => disconnected && (clientSignal?.aborted === true),
 
     // Call when client disconnects
     handleDisconnect: (reason = "client_closed") => {
@@ -86,7 +88,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
         abortTimeout = null;
       }
 
-      if (isClientDisconnect(error)) {
+      if (isClientDisconnect(error, { requestSignal: clientSignal || externalSignal, responseAborted: error?.responseAborted === true })) {
         logStream("⚡", "ABORTED");
         return;
       }
@@ -159,7 +161,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         // failure. ETIMEDOUT stays separate: an upstream connect/read timeout is a
         // real provider problem and must keep surfacing as an error.
         const isNetworkClose =
-          isClientDisconnect(error) ||
+          isClientDisconnect(error, { requestSignal: streamController.clientSignal, responseAborted: streamController.wasClientDisconnected?.() === true }) ||
           msg.includes("ETIMEDOUT") ||
           code === "ETIMEDOUT";
 
@@ -225,6 +227,8 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   // and a stale abort could fire after the request has already ended.
   const wrappedController = {
     signal: streamController.signal,
+    clientSignal: streamController.clientSignal,
+    wasClientDisconnected: () => streamController.isConnected?.() === false && streamController.clientSignal?.aborted === true,
     startTime: streamController.startTime,
     isConnected: () => streamController.isConnected(),
     handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleComplete(); },
@@ -271,4 +275,3 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     onAbortTerminal
   );
 }
-

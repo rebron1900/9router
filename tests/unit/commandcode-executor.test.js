@@ -57,6 +57,29 @@ describe("parseCommandCodeError", () => {
 });
 
 describe("inspectAndWrapCommandCodeResponse", () => {
+  it("returns after upstream headers without waiting for start/start-step or the first semantic event", async () => {
+    let pullCount = 0;
+    let upstreamController;
+    const upstream = new ReadableStream({
+      start(controller) { upstreamController = controller; },
+      pull() { pullCount += 1; },
+    });
+    const wrapped = inspectAndWrapCommandCodeResponse(new Response(upstream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    }), "poolside/laguna-s-2.1-free");
+
+    expect(wrapped).toBeInstanceOf(Response);
+    expect(wrapped.status).toBe(200);
+    expect(pullCount).toBe(0);
+
+    const reader = wrapped.body.getReader();
+    upstreamController.enqueue(new TextEncoder().encode('{"type":"start"}\n{"type":"start-step"}\n'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pullCount).toBeGreaterThan(0);
+    await reader.cancel();
+  });
+
   it("converts initial upstream 200 with error event to 503 Response", async () => {
     const ndjsonBody = createNdjsonStream([
       JSON.stringify({
@@ -76,12 +99,15 @@ describe("inspectAndWrapCommandCodeResponse", () => {
     });
 
     const result = await inspectAndWrapCommandCodeResponse(fakeResponse, "poolside/laguna-s-2.1-free");
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(503);
-
-    const body = await result.json();
-    expect(body.error.message).toContain("Service temporarily unavailable");
-    expect(body.error.code).toBe(503);
+    // Body-level errors cannot change HTTP status after execute() returns the
+    // upstream headers. They are emitted as an OpenAI SSE error; the forced
+    // JSON aggregator turns this into a 503 before committing a client body.
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    const sse = await result.text();
+    const errorLine = sse.split("\n").find((line) => line.startsWith("data: {") && line.includes('"error"'));
+    expect(JSON.parse(errorLine.slice(6)).error.message).toContain("Service temporarily unavailable");
+    expect(JSON.parse(errorLine.slice(6)).error.code).toBe(503);
   });
 
   it("converts initial upstream 200 with start/start-step followed by error to 503 Response", async () => {
@@ -105,11 +131,11 @@ describe("inspectAndWrapCommandCodeResponse", () => {
     });
 
     const result = await inspectAndWrapCommandCodeResponse(fakeResponse, "poolside/laguna-s-2.1-free");
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(503);
-
-    const body = await result.json();
-    expect(body.error.message).toContain("Service temporarily unavailable");
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    const sse = await result.text();
+    const errorLine = sse.split("\n").find((line) => line.startsWith("data: {") && line.includes('"error"'));
+    expect(JSON.parse(errorLine.slice(6)).error.message).toContain("Service temporarily unavailable");
   });
 
   it("streams successful responses when content is emitted", async () => {

@@ -16,9 +16,9 @@ function selectMappings(binding, requestFormat, operation) {
     .sort((a, b) => (Number(a.mappingPriority) || 1) - (Number(b.mappingPriority) || 1));
 }
 
-function requiredCapabilitiesMatch(model, binding) {
+function requiredCapabilitiesMatch(model, mapping) {
   const required = model?.requiredCapabilities || {};
-  const override = binding?.capabilityOverrides || {};
+  const override = mapping?.capabilityOverrides || {};
   for (const [name, requiredValue] of Object.entries(required)) {
     if (requiredValue !== true) continue;
     if (override[name] === false) return false;
@@ -50,18 +50,20 @@ export function planStandardModelCandidates({
       excluded.push({ providerId: provider, reason: "standard_model_disabled" });
       continue;
     }
-    if (!requiredCapabilitiesMatch(model, binding)) {
-      excluded.push({ providerId: provider, reason: "capability_mismatch" });
-      continue;
-    }
     if (requireConfiguredProvider && !binding.configured) {
       excluded.push({ providerId: provider, reason: "no_active_connection" });
       continue;
     }
 
-    const mappings = selectMappings(binding, requestFormat, operation);
+    const scopedMappings = selectMappings(binding, requestFormat, operation);
+    const mappings = scopedMappings.filter((mapping) => requiredCapabilitiesMatch(model, mapping));
     if (mappings.length === 0) {
-      excluded.push({ providerId: provider, reason: requestFormat || operation ? "no_matching_mapping" : "no_mapping" });
+      excluded.push({
+        providerId: provider,
+        reason: scopedMappings.length > 0
+          ? "capability_mismatch"
+          : (requestFormat || operation ? "no_matching_mapping" : "no_mapping"),
+      });
       continue;
     }
 

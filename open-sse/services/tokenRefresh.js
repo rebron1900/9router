@@ -76,7 +76,7 @@ export function parseVertexSaJson(apiKey) {
 // Cache Vertex tokens keyed by service account email { token, expiresAt }
 const vertexTokenCache = new Map();
 
-export async function refreshVertexToken(saJson, log) {
+export async function refreshVertexToken(saJson, log, requestOptions = {}) {
   const cacheKey = saJson.client_email;
   const cached = vertexTokenCache.get(cacheKey);
 
@@ -105,6 +105,10 @@ export async function refreshVertexToken(saJson, log) {
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
         assertion: jwt,
       }),
+      signal: requestOptions.signal,
+      attemptBudget: requestOptions.attemptBudget || null,
+      attemptProvider: "vertex",
+      attemptModel: requestOptions.model || "",
     });
 
     if (!res.ok) {
@@ -121,6 +125,12 @@ export async function refreshVertexToken(saJson, log) {
 
     return { accessToken: access_token, expiresAt };
   } catch (error) {
+    const routeBudget = requestOptions.attemptBudget;
+    if (routeBudget && (routeBudget.isBudgetError?.(error)
+      || routeBudget.snapshot?.().timedOut
+      || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+      throw routeBudget.error();
+    }
     log?.error?.("TOKEN_REFRESH", `Vertex token error: ${error.message}`);
     return null;
   }

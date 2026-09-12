@@ -42,6 +42,63 @@ import {
 } from "@/lib/standardModels/runtime";
 
 /**
+ * Keep a standard-route deadline alive for the entire returned Response body.
+ * A Response is committed before its ReadableStream finishes, so disposing
+ * the budget at the routing boundary would cancel an in-flight upstream body
+ * immediately after its first chunk. The wrapper owns cleanup on EOF, cancel,
+ * or stream error and preserves the deferred forced-JSON telemetry contract.
+ */
+export function withStandardRouteBudgetResponse(response, budget) {
+  if (!budget || !response?.body?.getReader) {
+    budget?.dispose?.();
+    return response;
+  }
+
+  const reader = response.body.getReader();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    budget.dispose?.();
+  };
+  const body = new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          dispose();
+          controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        dispose();
+        try { await reader.cancel(error); } catch { /* upstream already closed */ }
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      dispose();
+      try { await reader.cancel(reason); } catch { /* upstream already closed */ }
+    },
+  });
+  const wrapped = new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+  if (response.__9routerDeferredOutcome) {
+    try {
+      Object.defineProperty(wrapped, "__9routerDeferredOutcome", {
+        value: response.__9routerDeferredOutcome,
+        configurable: true,
+      });
+    } catch { /* Response implementations may be sealed */ }
+  }
+  return wrapped;
+}
+
+/**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
@@ -312,13 +369,16 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
   const failures = [];
 
   log.info("ROUTER", `Standard model "${modelStr}" → ${providerModels.join(", ")}`);
-  return handleComboChat({
+  let routedResponse;
+  try {
+    routedResponse = await handleComboChat({
     body,
     models: providerModels,
     handleSingleModel: (b, m) => {
       const candidate = candidates.find((item) => `${item.providerId}/${item.upstreamModelId}` === m);
       return handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
         attemptBudget: routeBudget,
+        signal: routeBudget.signal,
         maxAccountAttempts: maxAccountAttemptsPerProvider,
         standardRoute: true,
         standardModelId: standardModel.id,
@@ -382,7 +442,19 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
       failures: failures.length > 0 ? failures : [],
       budget,
     }),
-  });
+    });
+  } catch (error) {
+    routeBudget.dispose?.();
+    throw error;
+  }
+  // A forced JSON response may have committed its 200 heartbeat while the
+  // provider is still buffering. Keep the shared deadline alive until that
+  // deferred outcome settles; ordinary response bodies own cleanup until EOF.
+  const deferredOutcome = routedResponse?.__9routerDeferredOutcome;
+  if (deferredOutcome) {
+    Promise.resolve(deferredOutcome).finally(() => routeBudget.dispose?.()).catch(() => {});
+  }
+  return withStandardRouteBudgetResponse(routedResponse, routeBudget);
 }
 
 /**
@@ -471,7 +543,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   while (true) {
     if (routeContext?.attemptBudget && !routeContext.attemptBudget.canAttempt()) {
-      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+      if (request?.signal?.aborted) return errorResponse(499, "Request aborted");
+      return buildStandardRouteErrorResponse({
+        status: HTTP_STATUS.SERVICE_UNAVAILABLE,
+        message: "Standard route attempt budget exhausted",
+        publicModel: routeContext.standardModelPublicName,
+        code: "attempt_budget_exhausted",
+        budget: routeContext.attemptBudget,
+      });
     }
     if (routeContext?.signal?.aborted || request?.signal?.aborted) {
       return errorResponse(499, "Request aborted");
@@ -504,9 +583,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const maxAccountAttempts = Number(routeContext?.maxAccountAttempts);
     if (Number.isFinite(maxAccountAttempts) && maxAccountAttempts > 0 && accountAttempts >= Math.floor(maxAccountAttempts)) {
       return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, `Account attempt budget exhausted for provider: ${provider}`);
-    }
-    if (routeContext?.attemptBudget && !routeContext.attemptBudget.consume({ provider, model, scope: "account" }).allowed) {
-      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
     }
     accountAttempts += 1;
 
@@ -579,7 +655,30 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) {
+      if (result.deferredOutcome && result.response) {
+        // A forced JSON response may have committed a 200 heartbeat before its
+        // upstream outcome is known.  Carry that outcome alongside the Response
+        // so combo/standard routing can defer health telemetry without treating
+        // the provisional response as a provider success.
+        try {
+          Object.defineProperty(result.response, "__9routerDeferredOutcome", {
+            value: result.deferredOutcome,
+            configurable: true,
+          });
+        } catch { /* Response implementations may be sealed */ }
+      }
+      return result.response;
+    }
+
+    // A route budget is a request-level control signal, never a provider
+    // health failure. Do not pass its synthetic 503 through account cooldown
+    // or fallback bookkeeping.
+    const budgetFailure = routeContext?.attemptBudget && (
+      routeContext.attemptBudget.snapshot?.().timedOut
+      || /standard route .*budget|attempt budget exhausted/i.test(String(result.error || ""))
+    );
+    if (budgetFailure) return result.response;
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;

@@ -291,7 +291,37 @@ async function createBypassRequest(parsedUrl, realIP, options) {
   });
 }
 
+function mergeAttemptBudgetSignal(options, attemptBudget) {
+  if (!attemptBudget?.signal) return options;
+  const signal = options.signal
+    ? (options.signal === attemptBudget.signal ? options.signal : AbortSignal.any([options.signal, attemptBudget.signal]))
+    : attemptBudget.signal;
+  return { ...options, signal };
+}
+
+/**
+ * Route-scoped budgets are attached to proxyOptions by standard-model
+ * routing.  Keeping the accounting at this boundary covers BaseExecutor and
+ * provider-specific executors that issue their own fetch/retry calls without
+ * duplicating route logic in every provider implementation.  Legacy callers
+ * do not pass attemptBudget and remain unchanged.
+ */
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
+  const optionAttemptBudget = options?.attemptBudget || null;
+  const attemptBudget = proxyOptions?.attemptBudget || optionAttemptBudget;
+  const attemptProvider = proxyOptions?.attemptProvider || options?.attemptProvider || "unknown";
+  const attemptModel = proxyOptions?.attemptModel || options?.attemptModel || "unknown";
+  if (attemptBudget) {
+    const consumed = attemptBudget.consume({
+      provider: attemptProvider,
+      model: attemptModel,
+      scope: proxyOptions?.attemptScope || options?.attemptScope || "fetch",
+      url: typeof url === "string" ? url : url?.toString?.() || "",
+    });
+    if (!consumed.allowed) throw attemptBudget.error();
+  }
+  const { attemptBudget: _attemptBudget, attemptProvider: _attemptProvider, attemptModel: _attemptModel, attemptScope: _attemptScope, ...fetchOptions } = options || {};
+  const effectiveOptions = mergeAttemptBudgetSignal(fetchOptions, attemptBudget);
   const targetUrl = typeof url === "string" ? url : url.toString();
 
   // Vercel relay: forward request via relay headers
@@ -303,7 +333,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       "x-relay-target": `${parsed.protocol}//${parsed.host}`,
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
-    return originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
+    return originalFetch(vercelRelayUrl, { ...effectiveOptions, headers: relayHeaders });
   }
 
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
@@ -316,7 +346,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       // Proxy resolves DNS externally (not affected by /etc/hosts) — use proxy directly
       try {
         const dispatcher = await getDispatcher(proxyUrl);
-        return await originalFetch(url, { ...options, dispatcher });
+        return await originalFetch(url, { ...effectiveOptions, dispatcher });
       } catch (proxyError) {
         if (proxyOptions?.strictProxy === true) {
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
@@ -328,7 +358,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     try {
       const parsedUrl = new URL(targetUrl);
       const realIP = await resolveRealIP(parsedUrl.hostname);
-      if (realIP) return await createBypassRequest(parsedUrl, realIP, options);
+      if (realIP) return await createBypassRequest(parsedUrl, realIP, effectiveOptions);
     } catch (error) {
       console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
     }
@@ -337,20 +367,20 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   if (proxyUrl) {
     try {
       const dispatcher = await getDispatcher(proxyUrl);
-      return await originalFetch(url, { ...options, dispatcher });
+      return await originalFetch(url, { ...effectiveOptions, dispatcher });
     } catch (proxyError) {
       // If strictProxy is enabled, fail hard instead of falling back to direct
       if (proxyOptions?.strictProxy === true) {
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
-      return originalFetch(url, options);
+      return originalFetch(url, effectiveOptions);
     }
   }
 
   // got-scraping disabled — use native fetch directly
   // (Re-enable per-host by wrapping with tryGotScrapingFetch when needed)
-  return originalFetch(url, options);
+  return originalFetch(url, effectiveOptions);
 }
 
 /**

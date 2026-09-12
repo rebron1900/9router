@@ -5,6 +5,37 @@ import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  const error = new Error("Request aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
+function waitWithAbort(ms, signal) {
+  throwIfAborted(signal);
+  if (!ms || ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let timer = setTimeout(done, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      timer = null;
+      signal?.removeEventListener?.("abort", onAbort);
+      try { throwIfAborted(signal); } catch (error) { reject(error); }
+    };
+    function done() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
 /**
  * BaseExecutor - Base class for provider executors
  */
@@ -97,11 +128,18 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, attemptBudget = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
     const retryAttemptsByUrl = {};
+    // The route budget is independent of the stream controller so it also
+    // stops a direct executor retry/fetch when the caller has not supplied a
+    // separately merged signal.  In the normal route both signals are
+    // present: either client cancellation or the shared deadline wins.
+    const executionSignal = attemptBudget?.signal
+      ? (signal ? AbortSignal.any([signal, attemptBudget.signal]) : attemptBudget.signal)
+      : signal;
 
     // Merge default retry config with provider-specific config
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
@@ -120,7 +158,7 @@ export class BaseExecutor {
       }
       retryAttemptsByUrl[urlIndex]++;
       log?.debug?.("RETRY", `${reason} retry ${retryAttemptsByUrl[urlIndex]}/${attempts} after ${waitMs / 1000}s`);
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      await waitWithAbort(waitMs, executionSignal);
       return true;
     };
 
@@ -135,10 +173,14 @@ export class BaseExecutor {
       const connectCtrl = new AbortController();
       const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
       const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
-      const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+      const mergedSignal = executionSignal ? AbortSignal.any([executionSignal, connectCtrl.signal]) : connectCtrl.signal;
 
       try {
         const bodyStr = JSON.stringify(transformedBody);
+        if (attemptBudget && proxyOptions?.attemptBudget !== attemptBudget) {
+          const consumed = attemptBudget.consume({ provider: this.provider, model, scope: "fetch", url, urlIndex });
+          if (!consumed.allowed) throw attemptBudget.error();
+        }
         const fetchT0 = Date.now();
         dbg("FETCH", `${this.provider.toUpperCase()} → ${url} | body=${bodyStr.length}B | connectTimeout=${timeoutMs}ms`);
         const response = await proxyAwareFetch(url, {
@@ -163,6 +205,7 @@ export class BaseExecutor {
         return { response, url, headers, transformedBody };
       } catch (error) {
         clearTimeout(connectTimer);
+        if (attemptBudget?.isBudgetError?.(error) || attemptBudget?.snapshot?.().timedOut) throw attemptBudget?.error?.() || error;
         lastError = error;
         const isConnectTimeout = connectCtrl.signal.aborted && error.name === "AbortError";
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${error.name}: ${error.message}${isConnectTimeout ? " (connect timeout)" : ""}`);

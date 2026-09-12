@@ -14,7 +14,7 @@ import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { getExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
-import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, createRequestCorrelationId } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
 import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
 import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
@@ -62,6 +62,7 @@ export function stripContinuityFields(body) {
 
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, requestSignal, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, modelCapabilities = null, routeContext = null }) {
   const { provider, model } = modelInfo;
+  const requestId = createRequestCorrelationId();
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
@@ -201,6 +202,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool, capabilities);
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
+      saveRequestDetail(buildRequestDetail({
+        requestId, provider, model, connectionId,
+        latency: { ttft: 0, total: Date.now() - requestStartTime },
+        tokens: { prompt_tokens: 0, completion_tokens: 0 },
+        request: extractRequestConfig(body, stream),
+        response: { error: `Failed to translate request for ${sourceFormat} → ${targetFormat}`, status: HTTP_STATUS.BAD_REQUEST, thinking: null },
+        status: "error",
+      })).catch(() => {});
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     toolNameMap = translatedBody._toolNameMap;
@@ -337,7 +346,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (onDisconnect) onDisconnect(reason);
     },
     onError: () => trackPendingRequest(model, provider, connectionId, false),
-    log, provider, model, reqTag, externalSignal: requestSignal
+    log, provider, model, reqTag, externalSignal: routeContext?.attemptBudget?.signal || requestSignal, clientSignal: requestSignal
   });
 
   const proxyOptions = {
@@ -345,6 +354,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
     connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
     vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
+    // Standard routing attaches its shared attempt ledger at the proxy
+    // boundary as well as to BaseExecutor.  Provider-specific executors that
+    // issue their own fetch/retry calls therefore share the same deadline and
+    // attempt count without changing legacy requests.
+    attemptBudget: routeContext?.attemptBudget || null,
+    attemptProvider: provider,
+    attemptModel: model,
   };
 
   if (proxyOptions.vercelRelayUrl) {
@@ -387,6 +403,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       providerSessionId: sessionSeed,
       clientTool,
       signal: streamController.signal,
+      attemptBudget: routeContext?.attemptBudget || null,
       log,
       proxyOptions,
     });
@@ -397,22 +414,33 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     providerResponseFormat = result.responseFormat || targetFormat;
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    const clientDisconnected = isClientDisconnect(error, {
+      requestSignal,
+      responseAborted: streamController.wasClientDisconnected?.() === true,
+    });
+    const budgetExhausted = routeContext?.attemptBudget?.isBudgetError?.(error)
+      || routeContext?.attemptBudget?.snapshot?.().timedOut
+      || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED";
+    const failureStatus = clientDisconnected ? 499 : (budgetExhausted ? HTTP_STATUS.SERVICE_UNAVAILABLE : HTTP_STATUS.BAD_GATEWAY);
     trackPendingRequest(model, provider, connectionId, false, true);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${isClientDisconnect(error) ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
+    appendRequestLog({ model, provider, connectionId, status: `FAILED ${failureStatus}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
+      requestId, provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: translatedBody || null,
-      response: { error: error.message || String(error), status: isClientDisconnect(error) ? 499 : 502, thinking: null },
+      response: { error: error.message || String(error), status: failureStatus, thinking: null },
       pxpipe: pxpipeSummary,
       status: "error"
     })).catch(() => { });
 
-    if (isClientDisconnect(error)) {
+    if (clientDisconnected) {
       streamController.handleError(error);
       return createErrorResult(499, "Request aborted");
+    }
+    if (budgetExhausted) {
+      return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
     }
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     if (log?.errorLine) {
@@ -429,7 +457,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       // refreshWithRetry's 2nd/3rd attempt reuses the already-consumed RT →
       // invalid_grant → auth_failed retryable=false.
       const newCredentials = await refreshWithRetry(async () => {
-        const result = await executor.refreshCredentials(credentials, log);
+        const result = await executor.refreshCredentials(credentials, log, {
+          signal: streamController.signal,
+          attemptBudget: routeContext?.attemptBudget || null,
+          model,
+        });
         if (result?.refreshToken && result.refreshToken !== credentials.refreshToken) {
           if (result.accessToken) credentials.accessToken = result.accessToken;
           credentials.refreshToken = result.refreshToken;
@@ -451,6 +483,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             providerSessionId: sessionSeed,
             clientTool,
             signal: streamController.signal,
+            attemptBudget: routeContext?.attemptBudget || null,
             log,
             proxyOptions,
           });
@@ -459,11 +492,23 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             providerUrl = retryResult.url;
             providerResponseFormat = retryResult.responseFormat || targetFormat;
           }
-        } catch { log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`); }
+        } catch (error) {
+          if (routeContext?.attemptBudget && (routeContext.attemptBudget.isBudgetError?.(error)
+            || routeContext.attemptBudget.snapshot?.().timedOut
+            || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+            throw routeContext.attemptBudget.error();
+          }
+          log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
+        }
       } else {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`);
       }
     } catch (e) {
+      if (routeContext?.attemptBudget && (routeContext.attemptBudget.isBudgetError?.(e)
+        || routeContext.attemptBudget.snapshot?.().timedOut
+        || e?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw routeContext.attemptBudget.error();
+      }
       log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh threw: ${e.message}`);
     }
   }
@@ -474,7 +519,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
+      requestId, provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
@@ -493,20 +538,59 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs);
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = {
+    requestId, provider, model, body, stream, translatedBody, finalBody, requestStartTime,
+    connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary,
+    reqTag, log, requestSignal, attemptBudget: routeContext?.attemptBudget || null,
+  };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
+  const saveHandlerFailure = (result) => {
+    if (!result || result.success !== false) return;
+    const status = Number(result.status) || HTTP_STATUS.BAD_GATEWAY;
+    saveRequestDetail(buildRequestDetail({
+      requestId, provider, model, connectionId,
+      latency: { ttft: 0, total: Date.now() - requestStartTime },
+      tokens: { prompt_tokens: 0, completion_tokens: 0 },
+      request: extractRequestConfig(body, stream),
+      providerRequest: finalBody || translatedBody || null,
+      response: { error: result.error || "Request failed", status, thinking: null },
+      pxpipe: pxpipeSummary,
+      status: "error",
+    })).catch(() => {});
+  };
 
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
     const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, trackDone, appendLog });
     await captureResponseId(result, routeContext?.onResponseId);
-    if (result) { streamController.handleComplete(); return result; }
+    if (result) {
+      if (result.deferred && result.deferredOutcome) {
+        // Keep the controller attached to the budget/client signal until the
+        // background buffer settles.  Calling handleComplete here would detach
+        // the route deadline exactly while a large compaction is still running.
+        result.deferredOutcome.then(
+          (outcome) => {
+            saveHandlerFailure(outcome);
+            streamController.handleComplete();
+          },
+          (error) => {
+            saveHandlerFailure({ success: false, status: HTTP_STATUS.BAD_GATEWAY, error: error?.message || String(error) });
+            streamController.handleComplete();
+          },
+        );
+      } else {
+        saveHandlerFailure(result);
+        streamController.handleComplete();
+      }
+      return result;
+    }
   }
 
   // True non-streaming response
   if (!stream) {
     const result = await handleNonStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, toolNameMap, customToolNames, trackDone, appendLog });
+    saveHandlerFailure(result);
     await captureResponseId(result, routeContext?.onResponseId);
     streamController.handleComplete();
     return result;
@@ -514,7 +598,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Streaming response
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
-  return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials, preflightStream: routeContext?.standardRoute === true, onResponseId: routeContext?.onResponseId });
+  const result = await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials, preflightStream: routeContext?.standardRoute === true, onResponseId: routeContext?.onResponseId });
+  saveHandlerFailure(result);
+  return result;
 }
 
 async function captureResponseId(result, onResponseId) {

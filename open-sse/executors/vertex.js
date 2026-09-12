@@ -32,12 +32,20 @@ function parseVertexAdcJson(apiKey) {
  * Resolve GCP project ID from a raw Vertex API key.
  * Sends a dummy 404 request and parses "projects/{id}" from the error message.
  */
-async function resolveProjectId(apiKey) {
+async function resolveProjectId(apiKey, { signal, attemptBudget = null, model = "" } = {}) {
   if (projectIdCache.has(apiKey)) return projectIdCache.get(apiKey);
 
   const res = await fetch(
     `https://aiplatform.googleapis.com/v1/publishers/google/models/__probe__:generateContent?key=${apiKey}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal,
+      attemptBudget,
+      attemptProvider: "vertex",
+      attemptModel: model,
+    }
   );
   const json = await res.json().catch(() => null);
   const msg = json?.[0]?.error?.message || json?.error?.message || "";
@@ -118,11 +126,11 @@ export class VertexExecutor extends BaseExecutor {
     return headers;
   }
 
-  async refreshCredentials(credentials, log) {
+  async refreshCredentials(credentials, log, requestOptions = {}) {
     const saJson = parseVertexSaJson(credentials?.apiKey);
     if (!saJson) return null;
 
-    const result = await refreshVertexToken(saJson, log);
+    const result = await refreshVertexToken(saJson, log, requestOptions);
     if (!result) return null;
 
     return { accessToken: result.accessToken, expiresAt: result.expiresAt };
@@ -134,7 +142,11 @@ export class VertexExecutor extends BaseExecutor {
 
     // SA JSON flow: mint Bearer token via JWT assertion (cached)
     if (saJson) {
-      const result = await refreshVertexToken(saJson, log);
+      const result = await refreshVertexToken(saJson, log, {
+        signal,
+        attemptBudget: proxyOptions?.attemptBudget || null,
+        model,
+      });
       if (!result?.accessToken) throw new Error("Vertex: failed to mint access token from Service Account JSON");
       credentials.accessToken = result.accessToken;
     }
@@ -145,7 +157,13 @@ export class VertexExecutor extends BaseExecutor {
         adcJson.refresh_token,
         adcJson.client_id,
         adcJson.client_secret,
-        log
+        log,
+        {
+          signal,
+          attemptBudget: proxyOptions?.attemptBudget || null,
+          provider: "vertex",
+          model,
+        },
       );
       if (!result?.accessToken) throw new Error("Vertex: failed to refresh access token from ADC JSON (authorized_user)");
       credentials.accessToken = result.accessToken;
@@ -153,7 +171,11 @@ export class VertexExecutor extends BaseExecutor {
 
     // vertex-partner with raw key: auto-resolve project_id if not provided
     if (this.provider === "vertex-partner" && !saJson && !adcJson && !credentials?.providerSpecificData?.projectId) {
-      const projectId = await resolveProjectId(credentials.apiKey);
+       const projectId = await resolveProjectId(credentials.apiKey, {
+         signal,
+         attemptBudget: proxyOptions?.attemptBudget || null,
+         model,
+       });
       if (!projectId) throw new Error("Vertex: could not resolve project_id from API key. Please add it manually in provider settings.");
       log?.debug?.("VERTEX", `Resolved project_id: ${projectId}`);
       credentials.providerSpecificData = { ...credentials.providerSpecificData, projectId };

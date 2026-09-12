@@ -52,7 +52,12 @@ export class CommandCodeExecutor extends BaseExecutor {
     dbg("COMMANDCODE", `execute start | images=${imageCount} | model=${opts?.model || "unknown"}`);
     const result = await super.execute(opts);
     if (!result?.response?.ok || !result.response.body) return result;
-    result.response = await inspectAndWrapCommandCodeResponse(result.response, opts.model, imageCount);
+    // The upstream sends `start`/`start-step` before it starts the expensive
+    // generation/compaction phase.  Never await a read from that body here:
+    // chatCore must be able to start its forced-JSON keepalive as soon as fetch
+    // returns headers.  The wrapper below consumes and translates the body
+    // asynchronously while preserving every event in order.
+    result.response = inspectAndWrapCommandCodeResponse(result.response, opts.model, imageCount);
     return result;
   }
 
@@ -133,151 +138,26 @@ export function parseCommandCodeError(event) {
   return { statusCode, message, type };
 }
 
-export async function inspectAndWrapCommandCodeResponse(originalResponse, model, imageCount = 0) {
-  const reader = originalResponse.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const bufferedLines = [];
-  let detectedError = null;
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        const trimmed = buffer.trim();
-        if (trimmed) {
-          try {
-            const jsonStr = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
-            const parsed = JSON.parse(jsonStr);
-            if (parsed?.type === "error") {
-              detectedError = parsed;
-            } else {
-              bufferedLines.push(trimmed);
-            }
-          } catch {
-            bufferedLines.push(trimmed);
-          }
-        }
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      let stopLoop = false;
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const jsonStr = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
-        if (!jsonStr || jsonStr === "[DONE]") {
-          bufferedLines.push(trimmed);
-          stopLoop = true;
-          break;
-        }
-
-        let event;
-        try {
-          event = JSON.parse(jsonStr);
-        } catch {
-          bufferedLines.push(trimmed);
-          continue;
-        }
-
-        if (event?.type === "error") {
-          detectedError = event;
-          stopLoop = true;
-          break;
-        }
-
-        bufferedLines.push(trimmed);
-
-        if (
-          event?.type === "text-delta" ||
-          event?.type === "reasoning-delta" ||
-          event?.type === "tool-input-start" ||
-          event?.type === "tool-call" ||
-          event?.type === "finish" ||
-          event?.type === "finish-step"
-        ) {
-          stopLoop = true;
-          break;
-        }
-      }
-
-      if (stopLoop) break;
-    }
-  } catch {
-    try { reader.releaseLock(); } catch { /* ignore */ }
-    return originalResponse;
-  }
-
-  if (detectedError) {
-    try { await reader.cancel(); } catch { /* ignore */ }
-    const { statusCode, message, type } = parseCommandCodeError(detectedError);
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: `[CommandCode error: ${message}]`,
-          type,
-          code: statusCode,
-        },
-      }),
-      {
-        status: statusCode,
-        statusText: statusCode === 503 ? "Service Unavailable" : (statusCode === 429 ? "Too Many Requests" : "Bad Gateway"),
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        },
-      }
-    );
-  }
-
-  const combinedStream = createReplayedStream(bufferedLines, buffer, reader);
-  return wrapNdjsonAsOpenAISse(combinedStream, model, originalResponse, imageCount);
+export function inspectAndWrapCommandCodeResponse(originalResponse, model, imageCount = 0) {
+  if (!originalResponse?.body) return originalResponse;
+  return wrapNdjsonAsOpenAISse(originalResponse.body, model, originalResponse, imageCount);
 }
 
-function createReplayedStream(bufferedLines, remainingBuffer, reader) {
-  const encoder = new TextEncoder();
-  let replayed = false;
-
-  return new ReadableStream({
-    async pull(controller) {
-      if (!replayed) {
-        replayed = true;
-        let prefix = bufferedLines.join("\n");
-        if (prefix && remainingBuffer) {
-          prefix += "\n" + remainingBuffer;
-        } else if (remainingBuffer) {
-          prefix = remainingBuffer;
-        } else if (prefix) {
-          prefix += "\n";
-        }
-        if (prefix) {
-          controller.enqueue(encoder.encode(prefix));
-        }
-      }
-
-      try {
-        const { value, done } = await reader.read();
-        if (done) {
-          controller.close();
-        } else {
-          controller.enqueue(value);
-        }
-      } catch (err) {
-        controller.error(err);
-      }
+function commandCodeErrorChunk(line) {
+  const jsonStr = String(line || "").trim();
+  if (!jsonStr || jsonStr === "[DONE]") return null;
+  const payload = jsonStr.startsWith("data:") ? jsonStr.slice(5).trim() : jsonStr;
+  let event;
+  try { event = JSON.parse(payload); } catch { return null; }
+  if (event?.type !== "error") return null;
+  const { statusCode, message, type } = parseCommandCodeError(event);
+  return {
+    error: {
+      message: `[CommandCode error: ${message}]`,
+      type,
+      code: statusCode,
     },
-    async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } catch {
-        /* ignore */
-      }
-    },
-  });
+  };
 }
 
 function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null, imageCount = 0) {
@@ -303,13 +183,17 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null, image
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
+        const errorChunk = commandCodeErrorChunk(trimmed);
+        if (errorChunk) emitChunks(errorChunk, controller);
+        else emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
       }
     },
     flush(controller) {
       const trimmed = buffer.trim();
       if (trimmed) {
-        emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
+        const errorChunk = commandCodeErrorChunk(trimmed);
+        if (errorChunk) emitChunks(errorChunk, controller);
+        else emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
       }
       if (imageCount > 0) {
         dbg("COMMANDCODE", `visual proof token=${state.visualProofSeen ? "seen" : "not-seen"} | images=${imageCount}`);
@@ -319,6 +203,9 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null, image
   });
 
   const newBody = streamBody.pipeThrough(transform);
+  const headers = originalResponse?.headers ? Object.fromEntries(originalResponse.headers.entries()) : {};
+  delete headers["content-length"];
+  delete headers["content-encoding"];
   return new Response(newBody, {
     status: originalResponse?.status || 200,
     statusText: originalResponse?.statusText || "OK",
@@ -326,7 +213,7 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null, image
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      ...(originalResponse?.headers ? Object.fromEntries(originalResponse.headers.entries()) : {}),
+      ...headers,
       "content-type": "text/event-stream",
     },
   });

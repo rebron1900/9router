@@ -16,6 +16,9 @@ export const STANDARD_ROUTE_DEFAULTS = {
 const healthState = new Map();
 const responseAffinities = new Map();
 const STANDARD_RESPONSE_AFFINITY_TTL_MS = 30 * 60 * 1000;
+const STANDARD_RESPONSE_AFFINITY_CLEANUP_INTERVAL_MS = 60 * 1000;
+export const STANDARD_RESPONSE_AFFINITY_MAX_ENTRIES = 10_000;
+const STANDARD_ROUTE_BUDGET_ERROR_CODE = "STANDARD_ROUTE_BUDGET_EXHAUSTED";
 
 function asText(value) {
   if (typeof value === "string") return value;
@@ -38,7 +41,20 @@ function lowerText(value) {
 export function classifyStandardRouteFailure({ status, error, phase = "response" } = {}) {
   const code = Number(status) || 0;
   const text = lowerText(error);
-  const cancelled = code === 499 || /aborted|cancelled|canceled|client disconnect/.test(text);
+  // Bare "ResponseAborted"/"socket closed" text is not enough to establish
+  // direction: an upstream reset can carry the same wording. The chat layer
+  // turns a real request-signal abort into 499 before this classifier runs.
+  const cancelled = code === 499 || /request aborted|aborted by client|client disconnect|cancelled by client|canceled by client/.test(text);
+
+  if (/standard route .*budget|attempt budget exhausted|route budget exhausted/.test(text)) {
+    return {
+      category: "budget",
+      retryable: false,
+      shouldFallback: false,
+      healthEligible: false,
+      phase,
+    };
+  }
 
   if (cancelled) {
     return {
@@ -111,8 +127,8 @@ export function classifyStandardRouteFailure({ status, error, phase = "response"
 
 /**
  * Create one request-scoped attempt budget shared by provider/account tries.
- * The budget does not own a timer; callers check it before each expensive
- * attempt and can use the request AbortSignal for cancellation.
+ * It owns the deadline AbortSignal so every fetch, retry wait, and streaming
+ * response can observe the same route-wide timeout.
  */
 export function createStandardRouteBudget({
   maxAttempts = STANDARD_ROUTE_DEFAULTS.maxGenerationAttempts,
@@ -129,11 +145,38 @@ export function createStandardRouteBudget({
   const startedAt = now();
   let attempts = 0;
   let lastAttempt = null;
+  let timedOutByTimer = false;
+  let timer = null;
+  const budgetController = new AbortController();
+
+  const budgetError = () => {
+    const error = new Error("Standard route attempt budget exhausted");
+    error.name = "StandardRouteBudgetExceeded";
+    error.code = STANDARD_ROUTE_BUDGET_ERROR_CODE;
+    error.budget = true;
+    return error;
+  };
+  const cleanupParent = () => signal?.removeEventListener?.("abort", onParentAbort);
+  const abortForBudget = () => {
+    timedOutByTimer = true;
+    if (!budgetController.signal.aborted) budgetController.abort(budgetError());
+  };
+  const onParentAbort = () => {
+    if (!budgetController.signal.aborted) budgetController.abort(signal.reason);
+    if (timer) { clearTimeout(timer); timer = null; }
+    cleanupParent();
+  };
+  if (signal?.aborted) onParentAbort();
+  else {
+    signal?.addEventListener?.("abort", onParentAbort, { once: true });
+    timer = setTimeout(abortForBudget, duration);
+    timer?.unref?.();
+  }
 
   const state = () => {
-    const aborted = !!signal?.aborted;
+    const aborted = !!signal?.aborted || budgetController.signal.aborted;
     const elapsedMs = Math.max(0, now() - startedAt);
-    const timedOut = elapsedMs >= duration;
+    const timedOut = timedOutByTimer || elapsedMs >= duration || budgetController.signal.reason?.code === STANDARD_ROUTE_BUDGET_ERROR_CODE;
     return { aborted, timedOut, elapsedMs };
   };
 
@@ -165,7 +208,20 @@ export function createStandardRouteBudget({
       const current = state();
       return attempts >= limit || current.aborted || current.timedOut;
     },
+    signal: budgetController.signal,
+    error: budgetError,
+    isBudgetError(error) {
+      return isStandardRouteBudgetError(error);
+    },
+    dispose() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      cleanupParent();
+    },
   };
+}
+
+export function isStandardRouteBudgetError(error) {
+  return error?.code === STANDARD_ROUTE_BUDGET_ERROR_CODE || error?.name === "StandardRouteBudgetExceeded";
 }
 
 export function getStandardProviderHealthKey(standardModelId, providerId, upstreamModelId = "") {
@@ -284,22 +340,28 @@ export function extractStandardResponseIdFromChunk(chunk) {
 export function recordStandardResponseAffinity(responseId, affinity, now = Date.now) {
   const id = normalizeResponseId(responseId);
   if (!id || !affinity?.standardModelId || !affinity?.providerId || !affinity?.upstreamModelId) return false;
+  const nowMs = now();
+  maybePurgeExpiredResponseAffinities(nowMs);
   responseAffinities.set(id, {
     standardModelId: String(affinity.standardModelId),
     providerId: String(affinity.providerId),
     upstreamModelId: String(affinity.upstreamModelId),
     connectionId: affinity.connectionId ? String(affinity.connectionId) : null,
-    expiresAt: now() + STANDARD_RESPONSE_AFFINITY_TTL_MS,
+    expiresAt: nowMs + STANDARD_RESPONSE_AFFINITY_TTL_MS,
   });
+  enforceResponseAffinityLimit();
   return true;
 }
 
 export function getStandardResponseAffinity(responseId, now = Date.now) {
   const id = normalizeResponseId(responseId);
   if (!id) return null;
+  const nowMs = now();
+  maybePurgeExpiredResponseAffinities(nowMs);
   const entry = responseAffinities.get(id);
   if (!entry) return null;
-  if (entry.expiresAt <= now()) {
+  // Preserve exact per-key TTL semantics even between amortized full scans.
+  if (entry.expiresAt <= nowMs) {
     responseAffinities.delete(id);
     return null;
   }
@@ -308,6 +370,35 @@ export function getStandardResponseAffinity(responseId, now = Date.now) {
 
 export function resetStandardResponseAffinities() {
   responseAffinities.clear();
+  nextResponseAffinityCleanupAt = 0;
+}
+
+function purgeExpiredResponseAffinities(nowMs = Date.now()) {
+  for (const [id, entry] of responseAffinities) {
+    if (entry.expiresAt <= nowMs) responseAffinities.delete(id);
+  }
+  nextResponseAffinityCleanupAt = nowMs + STANDARD_RESPONSE_AFFINITY_CLEANUP_INTERVAL_MS;
+}
+
+let nextResponseAffinityCleanupAt = 0;
+
+function maybePurgeExpiredResponseAffinities(nowMs) {
+  if (responseAffinities.size === 0 || nowMs < nextResponseAffinityCleanupAt) return;
+  purgeExpiredResponseAffinities(nowMs);
+}
+
+function enforceResponseAffinityLimit() {
+  while (responseAffinities.size > STANDARD_RESPONSE_AFFINITY_MAX_ENTRIES) {
+    const oldest = responseAffinities.keys().next().value;
+    if (oldest === undefined) break;
+    responseAffinities.delete(oldest);
+  }
+}
+
+export function cleanupStandardResponseAffinities(now = Date.now) {
+  purgeExpiredResponseAffinities(now());
+  enforceResponseAffinityLimit();
+  return responseAffinities.size;
 }
 
 export function buildStandardRouteErrorResponse({

@@ -479,9 +479,14 @@ export class CursorExecutor extends BaseExecutor {
     };
   }
 
-  async executeAgent({ model, body, stream, credentials, signal }) {
+  async executeAgent({ model, body, stream, credentials, signal, attemptBudget = null }) {
     const agentEndpoint = PROVIDER_OAUTH.cursor?.agentEndpoint;
     if (!agentEndpoint) throw new Error("Cursor AgentService endpoint is not configured");
+
+    if (attemptBudget) {
+      const consumed = attemptBudget.consume({ provider: "cursor", model, scope: "fetch", url: agentEndpoint });
+      if (!consumed.allowed) throw attemptBudget.error();
+    }
 
     const url = `${agentEndpoint}${AGENT_RUN_PATH}`;
     const headers = this.buildHeaders(credentials);
@@ -495,6 +500,9 @@ export class CursorExecutor extends BaseExecutor {
       session = this.openAgentHttp2Stream(url, headers, requestController.signal);
       session.write(buildAgentRunFrame(body.messages || [], model));
     } catch (error) {
+      if (attemptBudget && (attemptBudget.isBudgetError?.(error) || attemptBudget.snapshot?.().timedOut || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw attemptBudget.error();
+      }
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
 
@@ -503,6 +511,9 @@ export class CursorExecutor extends BaseExecutor {
       responseHeaders = await session.responseHeaders;
     } catch (error) {
       session.close();
+      if (attemptBudget && (attemptBudget.isBudgetError?.(error) || attemptBudget.snapshot?.().timedOut || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw attemptBudget.error();
+      }
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
 
@@ -663,11 +674,14 @@ export class CursorExecutor extends BaseExecutor {
     };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, attemptBudget = null }) {
     if (isAgentTextRequest(body)) {
       try {
-        return await this.executeAgent({ model, body, stream, credentials, signal });
+        return await this.executeAgent({ model, body, stream, credentials, signal, attemptBudget });
       } catch (error) {
+        if (attemptBudget && (attemptBudget.isBudgetError?.(error) || attemptBudget.snapshot?.().timedOut || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+          throw attemptBudget.error();
+        }
         return {
           response: new Response(JSON.stringify({
             error: { message: error.message, type: "connection_error", code: "" },
@@ -685,6 +699,10 @@ export class CursorExecutor extends BaseExecutor {
 
     try {
       const shouldForceFetch = proxyOptions?.enabled === true || proxyOptions?.connectionProxyEnabled === true || !!proxyOptions?.vercelRelayUrl;
+      if (!shouldForceFetch && attemptBudget) {
+        const consumed = attemptBudget.consume({ provider: "cursor", model, scope: "fetch", url });
+        if (!consumed.allowed) throw attemptBudget.error();
+      }
       const response = (http2 && !shouldForceFetch)
         ? await this.makeHttp2Request(url, headers, transformedBody, signal)
         : await this.makeFetchRequest(url, headers, transformedBody, signal, proxyOptions);
@@ -710,6 +728,9 @@ export class CursorExecutor extends BaseExecutor {
 
       return { response: transformedResponse, url, headers, transformedBody: body };
     } catch (error) {
+      if (attemptBudget && (attemptBudget.isBudgetError?.(error) || attemptBudget.snapshot?.().timedOut || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
+        throw attemptBudget.error();
+      }
       const errorResponse = new Response(JSON.stringify({
         error: {
           message: error.message,

@@ -280,6 +280,7 @@ export async function fetchZedLlmToken(credentials, options = {}) {
       body: JSON.stringify({ organization_id: organizationId }),
       signal: options.signal ?? undefined,
     },
+    options.proxyOptions ?? null,
   );
   const token =
     typeof data?.token === "string" ? data.token : data?.token?.[0] || data?.token?.value;
@@ -308,7 +309,7 @@ export async function zedLlmFetch(credentials, path, options = {}) {
         Authorization: `Bearer ${token}`,
       },
       signal: options.signal ?? undefined,
-    });
+    }, options.proxyOptions ?? null);
   };
 
   let response = await buildRequest(false);

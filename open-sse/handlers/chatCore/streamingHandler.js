@@ -135,7 +135,7 @@ async function primeProviderResponse(providerResponse) {
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, preflightStream = false, onResponseId = null }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, requestId, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, attemptBudget = null, preflightStream = false, onResponseId = null }) {
   if (onRequestSuccess && !preflightStream) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -176,11 +176,19 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const primed = await primeProviderResponse(providerResponse);
     if (primed.error) {
       streamController?.handleError?.(primed.error);
+      if (attemptBudget?.isBudgetError?.(primed.error)
+        || attemptBudget?.snapshot?.().timedOut
+        || primed.error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED") {
+        return createErrorResult(503, "Standard route attempt budget exhausted");
+      }
       // A client that disappears mid-preflight is not a provider failure. Report
       // 499 so the coordinator neither cools the account down nor fails over.
       // Checked before the 502: `ResponseAborted` carries an empty message, so
       // folding it into the generic text below would erase the only signal.
-      if (isClientDisconnect(primed.error)) {
+      if (isClientDisconnect(primed.error, {
+        requestSignal: streamController?.clientSignal,
+        responseAborted: streamController?.wasClientDisconnected?.() === true,
+      })) {
         return createErrorResult(499, "Request aborted");
       }
       return createErrorResult(502, `Upstream stream failed before response output: ${primed.error.message}`);
@@ -214,7 +222,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, onResponseChunk, onResponseChunk);
 
   saveRequestDetail(buildRequestDetail({
-    provider, model, connectionId,
+    requestId, provider, model, connectionId,
     latency: { ttft: 0, total: Date.now() - requestStartTime },
     tokens: { prompt_tokens: 0, completion_tokens: 0 },
     request: extractRequestConfig(body, stream),
@@ -236,7 +244,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
+export function buildOnStreamComplete({ provider, model, requestId, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
   const onStreamComplete = (contentObj, usage, ttftAt) => {
@@ -248,7 +256,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     const safeThinking = contentObj?.thinking || null;
 
     saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
+      requestId, provider, model, connectionId,
       latency,
       tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
@@ -262,7 +270,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     });
 
     // Persist stream usage to DB (no console line; the "📊 done" line below is authoritative)
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
+    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, requestId, label: "STREAM USAGE", silent: true });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
   };
 

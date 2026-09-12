@@ -348,6 +348,45 @@ export async function handleComboChat({
 
     try {
       const result = await handleSingleModel(body, modelStr);
+
+      // Forced JSON may have committed a 200 heartbeat before buffering
+      // finishes.  Do not clear provider health or emit a success callback on
+      // the provisional Response.  The deferred outcome is telemetry only:
+      // once bytes are committed there is no safe HTTP status rewrite or
+      // fallback replay.
+      const deferredOutcome = result?.__9routerDeferredOutcome;
+      if (deferredOutcome) {
+        Promise.resolve(deferredOutcome).then((outcome) => {
+          const ok = outcome?.success === true;
+          const status = Number(outcome?.status || (ok ? 200 : 502));
+          const errorText = outcome?.error || (ok ? "" : "Deferred upstream request failed");
+          const classified = failureClassifier
+            ? (failureClassifier({ status, errorText, model: modelStr, response: result, deferred: true }) || {})
+            : {};
+          const shouldFallback = classified.shouldFallback ?? !ok;
+          const attempt = ok
+            ? { ok: true, model: modelStr, response: result, deferred: true }
+            : {
+              ok: false,
+              model: modelStr,
+              provider: String(modelStr).includes("/") ? String(modelStr).split("/", 1)[0] : null,
+              status,
+              errorText,
+              shouldFallback,
+              retryable: classified.retryable ?? shouldFallback,
+              category: classified.category || "transport",
+              healthEligible: classified.healthEligible,
+              response: result,
+              deferred: true,
+            };
+          Promise.resolve(onAttemptResult?.(attempt)).catch(() => {});
+        }).catch(() => {
+          // A telemetry promise must never become an unhandled rejection or
+          // change the already-committed response.
+        });
+        log.info("COMBO", `Model ${modelStr} returned a deferred response; routing outcome will be recorded after body completion`);
+        return result;
+      }
       
       // Success (2xx) - return response
       if (result.ok) {
@@ -385,6 +424,7 @@ export async function handleComboChat({
         : {};
       const shouldFallback = classifiedFailure.shouldFallback ?? legacyFailure.shouldFallback;
       const cooldownMs = classifiedFailure.cooldownMs ?? legacyFailure.cooldownMs;
+      if (classifiedFailure.category === "budget") budgetExhausted = true;
       const failure = {
         ok: false,
         model: modelStr,
@@ -396,11 +436,17 @@ export async function handleComboChat({
         category: classifiedFailure.category || "unknown",
         response: result,
       };
+      if (failure.category === "budget") budgetExhausted = true;
       failures.push(failure);
       try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
+        if (classifiedFailure.category === "budget") {
+          lastError = errorText;
+          lastStatus = result.status;
+          break;
+        }
         return result;
       }
 
@@ -438,6 +484,7 @@ export async function handleComboChat({
         retryable: classifiedFailure.retryable ?? true,
         category: classifiedFailure.category || "transport",
       };
+      if (failure.category === "budget") budgetExhausted = true;
       failures.push(failure);
       try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });

@@ -10,6 +10,16 @@ import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
 
+function sanitizeConversionErrorMessage(error, fallback = "Failed to convert streaming response to JSON") {
+  const raw = typeof error === "string" ? error : (error?.message || String(error || ""));
+  const sanitized = String(raw)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  return sanitized ? `${fallback}: ${sanitized}` : fallback;
+}
+
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
   const byType = item.content.find((c) => c.type === "output_text");
@@ -179,7 +189,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, targetFormat, provider, model, requestId, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log, requestSignal, attemptBudget }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -187,7 +197,7 @@ async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, t
   trackDone();
 
   const ctx = {
-    provider, model, connectionId,
+    requestId, provider, model, connectionId,
     request: extractRequestConfig(body, stream),
     providerRequest: finalBody || translatedBody || null
   };
@@ -204,7 +214,7 @@ async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, t
 
       const usage = jsonResponse.usage || {};
       appendLog({ tokens: usage, status: "200 OK" });
-      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, requestId, silent: true });
       if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
       // Same cache-inclusive total for the recorded detail, so the DB and the
@@ -284,8 +294,11 @@ async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, t
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
-      if (isClientDisconnect(err)) return createErrorResult(499, "Request aborted");
-      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
+      if (attemptBudget?.isBudgetError?.(err) || attemptBudget?.snapshot?.().timedOut) {
+        return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+      }
+      if (isClientDisconnect(err, { requestSignal, responseAborted: err?.responseAborted === true })) return createErrorResult(499, "Request aborted");
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, sanitizeConversionErrorMessage(err));
     }
   }
 
@@ -295,17 +308,16 @@ async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, t
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     if (parsed.error) {
-      return createErrorResult(
-        HTTP_STATUS.BAD_GATEWAY,
-        parsed.error.message || "Upstream SSE stream failed"
-      );
+      const upstreamStatus = Number(parsed.error.code || parsed.error.status || 0);
+      const status = upstreamStatus >= 400 && upstreamStatus <= 599 ? upstreamStatus : HTTP_STATUS.BAD_GATEWAY;
+      return createErrorResult(status, parsed.error.message || "Upstream SSE stream failed");
     }
 
     if (onRequestSuccess) await onRequestSuccess();
 
     const usage = parsed.usage || {};
     appendLog({ tokens: usage, status: "200 OK" });
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, requestId, silent: true });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
     const totalLatency = Date.now() - requestStartTime;
@@ -355,8 +367,11 @@ async function handleForcedSSEToJsonBuffered({ providerResponse, sourceFormat, t
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
-    if (isClientDisconnect(err)) return createErrorResult(499, "Request aborted");
-    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
+    if (attemptBudget?.isBudgetError?.(err) || attemptBudget?.snapshot?.().timedOut) {
+      return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
+    if (isClientDisconnect(err, { requestSignal, responseAborted: err?.responseAborted === true })) return createErrorResult(499, "Request aborted");
+    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, sanitizeConversionErrorMessage(err));
   }
 }
 
@@ -375,18 +390,33 @@ export async function handleForcedSSEToJson(context) {
     (result) => ({ type: "buffered", result }),
     (error) => ({ type: "error", error }),
   );
+  const settled = buffered.then((outcome) => {
+    if (outcome.type === "buffered") {
+      return { result: outcome.result, outcome: deferredOutcomeFromResult(outcome.result) };
+    }
+    const clientDisconnected = isClientDisconnect(outcome.error, {
+      requestSignal: context.requestSignal,
+      responseAborted: outcome.error?.responseAborted === true,
+    });
+    const budgetExhausted = context?.attemptBudget?.isBudgetError?.(outcome.error)
+      || context?.attemptBudget?.snapshot?.().timedOut
+      || outcome.error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED";
+    const result = createErrorResult(
+      clientDisconnected ? 499 : (budgetExhausted ? HTTP_STATUS.SERVICE_UNAVAILABLE : HTTP_STATUS.BAD_GATEWAY),
+      clientDisconnected
+        ? "Request aborted"
+        : (budgetExhausted ? "Standard route attempt budget exhausted" : (outcome.error?.message || "Failed to convert streaming response to JSON")),
+    );
+    return { result, outcome: deferredOutcomeFromResult(result) };
+  });
   let graceTimer;
   const grace = new Promise((resolve) => {
     graceTimer = setTimeout(() => resolve({ type: "grace" }), FORCED_JSON_HEARTBEAT_GRACE_MS);
   });
-  const outcome = await Promise.race([buffered, grace]);
-  if (outcome.type === "buffered") {
+  const outcome = await Promise.race([settled, grace]);
+  if (outcome?.result !== undefined && outcome?.outcome !== undefined) {
     clearTimeout(graceTimer);
     return outcome.result;
-  }
-  if (outcome.type === "error") {
-    clearTimeout(graceTimer);
-    throw outcome.error;
   }
 
   // The response headers are committed as a 200 once this stream is returned.
@@ -404,7 +434,7 @@ export async function handleForcedSSEToJson(context) {
         try { controller.enqueue(encoder.encode("\n")); } catch { /* client gone */ }
       }, FORCED_JSON_HEARTBEAT_MS);
       try {
-        const { result } = await buffered;
+        const { result } = await settled;
         const body = result?.response ? await result.response.text() : JSON.stringify({ error: { message: result?.error || "Request failed" } });
         controller.enqueue(encoder.encode(body));
         controller.close();
@@ -420,6 +450,11 @@ export async function handleForcedSSEToJson(context) {
   });
   return {
     success: true,
+    deferred: true,
+    // The outcome is deliberately observable by the routing coordinator but
+    // cannot trigger replay/fallback after the first heartbeat byte commits a
+    // 200 response.  It is only used for post-response health/usage telemetry.
+    deferredOutcome: settled.then(({ outcome }) => outcome),
     // The response body is intentionally still being produced after this
     // handler returns. captureResponseId must not await clone().json() here,
     // otherwise it defeats the heartbeat and delays the headers until the
@@ -433,5 +468,15 @@ export async function handleForcedSSEToJson(context) {
         "Access-Control-Allow-Origin": "*"
       }
     })
+  };
+}
+
+function deferredOutcomeFromResult(result) {
+  if (!result) return { success: true, status: 200, error: null };
+  return {
+    success: result.success === true,
+    status: Number(result.status || result.response?.status || (result.success ? 200 : HTTP_STATUS.BAD_GATEWAY)),
+    error: result.error || null,
+    response: result.response || null,
   };
 }

@@ -52,10 +52,11 @@ describe("Responses abort terminal synthesis", () => {
   });
 
   it("does not synthesize terminal for non-Responses streams (callback null)", async () => {
+    let upstreamController;
     const upstream = new ReadableStream({
       start(controller) {
+        upstreamController = controller;
         controller.enqueue(new TextEncoder().encode("data: hi\n\n"));
-        controller.error(new Error("socket hang up"));
       },
     });
 
@@ -65,8 +66,12 @@ describe("Responses abort terminal synthesis", () => {
       null
     );
 
-    const text = await readAll(out);
+    const reader = out.getReader();
+    const first = await reader.read();
+    const text = new TextDecoder().decode(first.value);
     expect(text).not.toContain("response.failed");
     expect(text).not.toContain("[DONE]");
+    upstreamController.error(new Error("socket hang up"));
+    await expect(reader.read()).rejects.toThrow("socket hang up");
   });
 });
