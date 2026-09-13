@@ -4,28 +4,52 @@ import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getModelType } from "open-sse/config/providerModels.js";
+
+function normalizeRequestedKind(value) {
+  const kind = String(value || "llm").trim();
+  return kind === "chat" ? "llm" : kind;
+}
+
+function modelKindOf(model) {
+  return getModelType(model?.provider, model?.model) || "llm";
+}
+
+function matchesRequestedKind(kind, requestedKind) {
+  return requestedKind === "all" || kind === requestedKind;
+}
 
 // GET /api/models - Get models with aliases
-export async function GET() {
+// includeDisabled is used by the dashboard model-control modal so it can
+// display models that are currently hidden and make them available again.
+export async function GET(request) {
   try {
+    const searchParams = new URL(request?.url || "http://localhost/api/models").searchParams;
+    const includeDisabled = searchParams.get("includeDisabled") === "true";
+    const requestedKind = normalizeRequestedKind(searchParams.get("kind"));
     const modelAliases = await getModelAliases();
     const disabled = await getDisabledModels();
 
+    // The default catalog is for chat models. The model-control dialog asks
+    // for kind=all so it can present each service type in its own tab.
     const models = AI_MODELS
-      .filter((m) => {
-        const alias = getProviderAlias(m.provider) || m.provider;
-        const list = disabled[alias] || disabled[m.provider] || [];
-        return !list.includes(m.model);
-      })
       .map((m) => {
+        const kind = modelKindOf(m);
         const fullModel = `${m.provider}/${m.model}`;
         const providerAlias = getProviderAlias(m.provider) || m.provider;
         const routedModel = `${providerAlias}/${m.model}`;
+        const disabledIds = new Set([
+          ...(disabled[providerAlias] || []),
+          ...(disabled[m.provider] || []),
+        ]);
         const c = getCapabilitiesForModel(m.provider, m.model);
         return {
           ...m,
           fullModel,
           routedModel,
+          providerAlias,
+          kind,
+          disabled: disabledIds.has(m.model),
           alias: modelAliases[fullModel] || m.model,
           caps: {
             vision: c.vision,
@@ -35,23 +59,38 @@ export async function GET() {
             maxOutput: c.maxOutput,
           },
         };
-      });
+      })
+      .filter((m) => matchesRequestedKind(m.kind, requestedKind))
+      .filter((m) => includeDisabled || !m.disabled);
 
     // Custom models ride along; their stored caps override the name heuristic
     const seenFull = new Set(models.map((m) => m.fullModel));
     const customModels = (await getCustomModels()).filter((m) => {
-      if (!m?.id || (m.kind || m.type || "llm") !== "llm") return false;
-      return !seenFull.has(`${m.providerAlias}/${m.id}`);
+      if (!m?.id) return false;
+      const kind = m.kind || m.type || "llm";
+      return matchesRequestedKind(kind, requestedKind)
+        && !seenFull.has(`${m.providerAlias}/${m.id}`);
     });
     for (const m of customModels) {
+      const kind = m.kind || m.type || "llm";
       const fullModel = `${m.providerAlias}/${m.id}`;
       const c = getCapabilitiesForModel(m.providerAlias, m.id);
+      const providerAlias = m.providerAlias;
+      const disabledIds = new Set([
+        ...(disabled[providerAlias] || []),
+        ...(disabled[m.provider] || []),
+      ]);
+      const isDisabled = disabledIds.has(m.id);
+      if (!includeDisabled && isDisabled) continue;
       models.push({
         provider: m.providerAlias,
         model: m.id,
         name: m.name || m.id,
         fullModel,
         routedModel: fullModel,
+        providerAlias,
+        kind,
+        disabled: isDisabled,
         alias: modelAliases[fullModel] || m.id,
         caps: {
           vision: c.vision,

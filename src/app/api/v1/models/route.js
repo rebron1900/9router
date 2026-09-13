@@ -175,6 +175,23 @@ function inferKindFromUnknownModelId(modelId) {
   return LLM_KIND;
 }
 
+function standardModelKind(model, capabilities) {
+  const values = [model?.publicName, model?.officialModelId, model?.displayName]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (capabilities?.image === true
+    || capabilities?.imageGeneration === true
+    || capabilities?.imageEdit === true
+    || capabilities?.imageOutput === true
+    || capabilities?.text2img === true
+    || capabilities?.edit === true
+    || /image|imagen|dall-?e|flux|stable-diffusion|sdxl/.test(values)) {
+    return "image";
+  }
+  return LLM_KIND;
+}
+
 // DSH and several OpenAI-compatible clients use modality metadata when
 // deciding whether to preserve uploaded images. Keep the existing capabilities
 // object for 9router consumers, and expose the equivalent input list in both
@@ -355,7 +372,14 @@ export async function buildModelsList(kindFilter, options = {}) {
   } catch (e) {
     console.log("Could not fetch disabled models");
   }
-  const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
+  const isDisabled = (...args) => {
+    const modelId = args.pop();
+    return args.some(
+      (alias) =>
+        Array.isArray(disabledByAlias[alias]) &&
+        disabledByAlias[alias].includes(modelId),
+    );
+  };
 
   const activeConnectionByProvider = new Map();
   for (const conn of connections) {
@@ -421,6 +445,7 @@ export async function buildModelsList(kindFilter, options = {}) {
 
       const modelId = String(customModel.id).trim();
       if (!modelId) continue;
+      if (isDisabled(providerAlias, modelId)) continue;
 
       models.push({
         id: `${providerAlias}/${modelId}`,
@@ -659,18 +684,25 @@ export async function buildModelsList(kindFilter, options = {}) {
       publicName: standardModel.publicName,
       persisted: localCapabilities,
     });
+    const standardKind = standardModelKind(standardModel, standardCapabilities);
     const hasImageCapability = await standardModelHasImageCapability(standardModel, standardCapabilities);
     if (hasImageCapability && standardCapabilities.imageOutput !== true) {
       standardCapabilities = { ...standardCapabilities, imageOutput: true };
     }
     if (kindFilter.includes("image") && !hasImageCapability) continue;
+    // The default /v1/models catalog includes enabled standard image models so
+    // clients that only discover the root endpoint can use them. Capability
+    // scoped catalogs still return only their requested kind.
+    if (!kindFilter.includes(standardKind) && !(standardKind === "image" && kindFilter.includes(LLM_KIND))) continue;
     const entry = {
       id: standardModel.publicName,
       object: "model",
       owned_by: standardModel.publisher || "9router",
       standard_model: true,
       root: standardModel.officialModelId,
+      kind: standardKind,
     };
+    if (standardKind === "image") entry.endpoint = "/v1/images/generations";
     entry.capabilities = standardCapabilities;
     attachInputModalities(entry, standardCapabilities);
     if (Number.isFinite(Number(standardModel.limits?.contextWindow))) {

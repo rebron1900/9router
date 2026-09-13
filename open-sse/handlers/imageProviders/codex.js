@@ -76,7 +76,7 @@ function buildContent(prompt, refs, detail = CODEX_REF_DETAIL) {
 }
 
 // Parse Codex SSE stream → final base64 image. Optional callbacks for client streaming.
-async function parseStream(response, log, callbacks = {}) {
+async function parseStream(response, log, callbacks = {}, signal = null) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -86,6 +86,7 @@ async function parseStream(response, log, callbacks = {}) {
   let lastProgressLogMs = 0;
 
   while (true) {
+    if (signal?.aborted) throw signal.reason || new Error("Request aborted");
     const { done, value } = await reader.read();
     if (done) break;
     bytesReceived += value?.byteLength || 0;
@@ -139,7 +140,7 @@ async function parseStream(response, log, callbacks = {}) {
 }
 
 // SSE Response that pipes codex progress + partial + done events to client
-function buildSseResponse(providerResponse, log, onSuccess) {
+function buildSseResponse(providerResponse, log, onSuccess, signal = null) {
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
@@ -150,7 +151,7 @@ function buildSseResponse(providerResponse, log, onSuccess) {
         const b64 = await parseStream(providerResponse, log, {
           onProgress: (info) => send("progress", info),
           onPartialImage: (info) => send("partial_image", info),
-        });
+        }, signal);
         if (!b64) {
           send("error", { message: "Codex did not return an image. Account may not be entitled (Plus/Pro required)." });
         } else {
@@ -198,7 +199,9 @@ export default {
     const detail = body.image_detail || CODEX_REF_DETAIL;
     const { responsesModel, toolModel } = resolveCodexImageModels(model);
     const imgTool = { type: "image_generation", output_format: (body.output_format || "png").toLowerCase() };
-    const isEdit = body._imageOperation === "edit" || body.operation === "edit";
+    const isEdit = body._imageOperation === "edit"
+      || body.image_operation === "edit"
+      || body.operation === "edit";
     if (toolModel) {
       // Keep the legacy generations behavior for callers that supplied an
       // input image, while the dedicated edits route can force edit mode even
@@ -212,6 +215,10 @@ export default {
     if (body.size && body.size !== "") imgTool.size = body.size;
     if (body.quality && body.quality !== "") imgTool.quality = body.quality;
     if (body.background && body.background !== "") imgTool.background = body.background;
+    if (body.input_fidelity && body.input_fidelity !== "") imgTool.input_fidelity = body.input_fidelity;
+    if (body.output_compression !== undefined && body.output_compression !== null && body.output_compression !== "") {
+      imgTool.output_compression = body.output_compression;
+    }
     return {
       model: responsesModel,
       instructions: "",
@@ -226,11 +233,11 @@ export default {
     };
   },
   // Custom: codex parses SSE → either pipe to client or collect b64
-  async parseResponse(response, { log, streamToClient, onRequestSuccess }) {
+  async parseResponse(response, { log, streamToClient, onRequestSuccess, signal }) {
     if (streamToClient) {
-      return { sseResponse: buildSseResponse(response, log, onRequestSuccess) };
+      return { sseResponse: buildSseResponse(response, log, onRequestSuccess, signal) };
     }
-    const b64 = await parseStream(response, log);
+    const b64 = await parseStream(response, log, {}, signal);
     if (!b64) {
       throw new Error("Codex did not return an image. Account may not be entitled (Plus/Pro required).");
     }

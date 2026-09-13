@@ -18,8 +18,11 @@ const PROVIDER_ORDER = [
   ...Object.keys(APIKEY_PROVIDERS),
 ];
 
-// Providers that need no auth — always show in model selector
-const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
+// Providers that need no auth — always show in model selector. Hidden registry
+// entries are implementation/deprecation entries and must never leak into a
+// user-facing picker (for example the retired mimo-free endpoint).
+const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS)
+  .filter((id) => FREE_PROVIDERS[id].noAuth && !FREE_PROVIDERS[id].hidden);
 
 function normalizeModelIdentity(value) {
   return String(value || "")
@@ -113,6 +116,7 @@ export default function ModelSelectModal({
   confirming = false,
   confirmLabel = "Confirm Add",
   allowEmptySelection = false,
+  allowDisabledModels = false,
   extraModels = [],
   excludedProviderIds = [],
 }) {
@@ -262,7 +266,9 @@ export default function ModelSelectModal({
     };
 
     // Get all active provider IDs from connections (filtered by kindFilter if set)
-    const activeConnectionIds = filteredActiveProviders.map(p => p.provider);
+    const activeConnectionIds = filteredActiveProviders
+      .map((p) => p.provider)
+      .filter((providerId) => !AI_PROVIDERS[providerId]?.hidden);
 
     // No-auth providers: filter by kindFilter as well
     const noAuthIds = kindFilter
@@ -510,7 +516,12 @@ export default function ModelSelectModal({
       }
     }
 
-    // Filter out disabled models per provider (disabled keyed by storage alias OR providerId)
+    // Filter out disabled models per provider (disabled keyed by storage alias OR providerId).
+    // A model that is already selected stays visible so an existing Combo or
+    // standard-model binding can be edited and removed after it is disabled in
+    // Model availability. Explicit route editors may opt into showing all
+    // disabled entries so users can deliberately keep or add one.
+    const selectedValues = new Set(addedModelValues);
     Object.entries(groups).forEach(([providerId, group]) => {
       const aliasKey = getProviderAlias(providerId);
       const disabledIds = new Set([
@@ -518,12 +529,14 @@ export default function ModelSelectModal({
         ...(disabledModels[providerId] || []),
       ]);
       if (disabledIds.size === 0) return;
-      group.models = group.models.filter((m) => !disabledIds.has(m.id));
+      group.models = group.models
+        .filter((m) => !disabledIds.has(m.id) || selectedValues.has(m.value) || allowDisabledModels)
+        .map((m) => (disabledIds.has(m.id) ? { ...m, isDisabled: true } : m));
       if (group.models.length === 0) delete groups[providerId];
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, localModelsByProvider, extraModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, localModelsByProvider, extraModels, addedModelValues, allowDisabledModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
@@ -703,7 +716,13 @@ export default function ModelSelectModal({
                   <button
                     key={model.value}
                     onClick={() => handleSelect({ ...model, providerId })}
-                      title={isPlaceholder ? translate("Select to pre-fill, then edit model ID in the input") : undefined}
+                    title={isPlaceholder
+                      ? translate("Select to pre-fill, then edit model ID in the input")
+                      : model.isDisabled
+                        ? translate(isAdded
+                          ? "Hidden from model discovery. Click to remove it from this configuration."
+                          : "Hidden from model discovery. Add only when you explicitly want this route to use it.")
+                        : undefined}
                     className={`
                       px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
                       ${isPlaceholder
@@ -728,6 +747,7 @@ export default function ModelSelectModal({
                       ) : model.isCustom ? (
                         <>
                           {model.name}
+                          {model.isDisabled && <span className="text-[9px] text-amber-600">{translate("hidden")}</span>}
                           <span className="text-[9px] opacity-60 font-normal">{translate("custom")}</span>
                           {isPreferred && <span className="text-[9px] text-green-600">{translate("matched")}</span>}
                           <CapacityBadges caps={getCaps(model.value)} />
@@ -735,6 +755,7 @@ export default function ModelSelectModal({
                       ) : (
                         <>
                           {model.name}
+                          {model.isDisabled && <span className="text-[9px] text-amber-600">{translate("hidden")}</span>}
                           {isPreferred && <span className="text-[9px] text-green-600">{translate("matched")}</span>}
                           <CapacityBadges caps={getCaps(model.value)} />
                         </>
@@ -784,6 +805,7 @@ ModelSelectModal.propTypes = {
   confirming: PropTypes.bool,
   confirmLabel: PropTypes.string,
   allowEmptySelection: PropTypes.bool,
+  allowDisabledModels: PropTypes.bool,
   extraModels: PropTypes.arrayOf(PropTypes.shape({
     providerId: PropTypes.string,
     id: PropTypes.string,

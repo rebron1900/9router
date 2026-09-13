@@ -1,4 +1,5 @@
 import { PROVIDER_MODELS } from "@/shared/constants/models";
+import { getDisabledModels } from "@/lib/disabledModelsDb";
 
 /**
  * Handle CORS preflight
@@ -21,6 +22,12 @@ export async function GET() {
   try {
     const models = [];
     const seen = new Set();
+    let disabled = {};
+    try {
+      disabled = await getDisabledModels();
+    } catch (error) {
+      console.log("Could not fetch disabled models:", error?.message || error);
+    }
 
     function addModel({ name, displayName, description, methods = ["generateContent"] }) {
       if (seen.has(name)) return;
@@ -37,6 +44,9 @@ export async function GET() {
     
     for (const [provider, providerModels] of Object.entries(PROVIDER_MODELS)) {
       for (const model of providerModels) {
+        if (Array.isArray(disabled[provider]) && disabled[provider].includes(model.id)) {
+          continue;
+        }
         addModel({
           name: `models/${provider}/${model.id}`,
           displayName: model.name || model.id,

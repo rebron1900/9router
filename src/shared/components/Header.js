@@ -87,6 +87,13 @@ const getPageInfo = (pathname) => {
       icon: "dns",
       breadcrumbs: [],
     };
+  if (pathname.includes("/images"))
+    return {
+      title: "Image Studio",
+      description: "Create and edit images with your configured providers",
+      icon: "image",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/combos"))
     return {
       title: "Combos",

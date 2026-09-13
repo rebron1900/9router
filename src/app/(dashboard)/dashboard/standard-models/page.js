@@ -770,6 +770,7 @@ export default function StandardModelsPage() {
         confirming={saving}
         confirmLabel="Save selection"
         allowEmptySelection
+        allowDisabledModels
         extraModels={bindings.map(getBindingSelection).filter(Boolean)}
         closeOnSelect={false}
       />}

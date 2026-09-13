@@ -1,3 +1,14 @@
+# v0.5.79 (2026-09-13)
+
+## Features
+- **Model management**: add model visibility controls by model kind, show only configured providers, and keep explicit Combo and standard-model routes editable when a model is hidden from discovery.
+- **Dashboard navigation**: place Standard Models directly below Combo & Vision Adapter.
+
+## Fixes
+- **Image generation**: harden provider token refresh, stream cancellation, and request timeout handling across image routes.
+- **Routing**: stop capacity adapters from inventing a fallback model when their configured pool is empty.
+- **Internationalization**: translate the Model visibility controls and hidden-model guidance in Simplified Chinese.
+
 # v0.5.78 (2026-09-12)
 
 ## Fixes

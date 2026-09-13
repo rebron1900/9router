@@ -404,6 +404,7 @@ export default function ComboDetailPage() {
           title={`Add ${kindLabel} Model`}
           kindFilter={combo.kind}
           addedModelValues={providers}
+          allowDisabledModels
           closeOnSelect={false}
         />
       )}

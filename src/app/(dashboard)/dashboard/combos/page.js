@@ -21,7 +21,6 @@ const CAPACITY_ADAPTER_CAPS = [
   // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
   { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "Audio input" },
 ];
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
 const EMPTY_CAP_ENTRY = { enabled: true, roundRobin: false, models: [] };
 const EMPTY_CAPACITY_ADAPTER = {
   vision: { ...EMPTY_CAP_ENTRY },
@@ -402,6 +401,7 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
           activeProviders={activeProviders}
           title="Select Judge Model"
           addedModelValues={judge ? [judge] : []}
+          allowDisabledModels
           closeOnSelect={true}
         />
       )}
@@ -453,7 +453,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
 
   const handleRemove = (index) => {
     const next = models.filter((_, i) => i !== index);
-    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+    patch({ models: next });
   };
 
   const handleMove = (index, delta) => {
@@ -484,7 +484,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
             </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
               {models.length === 0 ? (
-                <span className="text-xs text-text-muted italic">No models</span>
+                <span className="text-xs text-text-muted italic">No models selected — add one to enable this adapter</span>
               ) : (
                 models.slice(0, 3).map((model, index) => (
                   <code
@@ -544,6 +544,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
           activeProviders={activeProviders}
           title={`Add ${cap.label} Model`}
           addedModelValues={models}
+          allowDisabledModels
           capFilter={cap.key}
           closeOnSelect={false}
         />
@@ -847,6 +848,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
           title="Add Model to Combo"
           kindFilter={kindFilter}
           addedModelValues={models}
+          allowDisabledModels
           closeOnSelect={false}
         />
       )}

@@ -324,4 +324,54 @@ describe("standard model route runtime", () => {
     expect(plan.candidates).toHaveLength(0);
     expect(plan.excluded).toEqual([{ providerId: "provider-a", reason: "capability_mismatch" }]);
   });
+
+  it("selects the explicit generation and edit mappings for unified image requests", () => {
+    const bindings = [{
+      id: "binding-images",
+      providerId: "openai",
+      priority: 1,
+      configured: true,
+      mappings: [
+        {
+          id: "generation",
+          upstreamModelId: "gpt-image-1",
+          mappingPriority: 1,
+          requestFormats: ["openai-images"],
+          operations: ["image_generation"],
+        },
+        {
+          id: "edit",
+          upstreamModelId: "gpt-image-1",
+          mappingPriority: 2,
+          requestFormats: ["openai"],
+          operations: ["image_edit"],
+        },
+        {
+          id: "chat-only",
+          upstreamModelId: "gpt-4o",
+          mappingPriority: 3,
+          requestFormats: ["openai-chat"],
+          operations: ["chat"],
+        },
+      ],
+    }];
+
+    const generation = planStandardModelCandidates({
+      model: { id: "standard-image", publicName: "unified-image", enabled: true },
+      bindings,
+      requestFormat: ["openai-images", "openai-image", "openai"],
+      operation: ["image_generation", "images.generate", "generation"],
+      requireConfiguredProvider: true,
+    });
+    const edit = planStandardModelCandidates({
+      model: { id: "standard-image", publicName: "unified-image", enabled: true },
+      bindings,
+      requestFormat: ["openai-images", "openai-image", "openai"],
+      operation: ["image_edit", "images.edit", "edit"],
+      requireConfiguredProvider: true,
+    });
+
+    expect(generation.candidates.map((candidate) => candidate.mappingId)).toEqual(["generation"]);
+    expect(edit.candidates.map((candidate) => candidate.mappingId)).toEqual(["edit"]);
+  });
 });

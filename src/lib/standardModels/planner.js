@@ -2,17 +2,32 @@ function asArray(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()) : [];
 }
 
-function matchesScope(values, requested) {
+const REQUEST_FORMAT_ALIASES = {
+  "openai-images": ["openai-images", "openai-image", "openai", "images"],
+};
+
+const OPERATION_ALIASES = {
+  image_generation: ["image_generation", "images.generate", "generation", "generate", "text_to_image"],
+  image_edit: ["image_edit", "images.edit", "edit", "image_to_image", "inpainting"],
+};
+
+function requestedValues(requested, aliases) {
+  const values = Array.isArray(requested) ? requested : [requested];
+  return values.flatMap((value) => aliases[value] || [value]).filter((value) => value !== null && value !== undefined && value !== "");
+}
+
+function matchesScope(values, requested, aliases = {}) {
   const list = asArray(values);
-  return list.length === 0 || list.includes(requested);
+  if (list.length === 0 || requested === null || requested === undefined || requested === "") return true;
+  return requestedValues(requested, aliases).some((value) => list.includes(value));
 }
 
 function selectMappings(binding, requestFormat, operation) {
   const mappings = Array.isArray(binding.mappings) ? binding.mappings : [];
   return mappings
     .filter((mapping) => mapping.enabled !== false)
-    .filter((mapping) => matchesScope(mapping.requestFormats, requestFormat))
-    .filter((mapping) => !operation || matchesScope(mapping.operations, operation))
+    .filter((mapping) => matchesScope(mapping.requestFormats, requestFormat, REQUEST_FORMAT_ALIASES))
+    .filter((mapping) => !operation || matchesScope(mapping.operations, operation, OPERATION_ALIASES))
     .sort((a, b) => (Number(a.mappingPriority) || 1) - (Number(b.mappingPriority) || 1));
 }
 

@@ -75,8 +75,9 @@ export default function createOpenAIAdapter(providerId) {
   const cfg = imageCfg(providerId);
   return {
     buildUrl: (_model, _credentials, body = {}) => {
-      if (body?._imageOperation !== "edit") return imageUrl(providerId);
-      if (cfg.editBaseUrl) return cfg.editBaseUrl;
+      const isEdit = body?._imageOperation === "edit" || body?.image_operation === "edit";
+      if (!isEdit) return imageUrl(providerId);
+      if (cfg.editBaseUrl || cfg.editUrl) return cfg.editBaseUrl || cfg.editUrl;
       return imageUrl(providerId)?.replace(/\/generations(?=$|[?#])/i, "/edits");
     },
     buildHeaders: (creds, requestBody) => {
@@ -93,7 +94,8 @@ export default function createOpenAIAdapter(providerId) {
       return headers;
     },
     buildBody: (model, body) => {
-      if (body?._imageOperation === "edit") return buildEditBody(model, body);
+      const isEdit = body?._imageOperation === "edit" || body?.image_operation === "edit";
+      if (isEdit) return buildEditBody(model, body);
       const { prompt, n = 1, size = "1024x1024", quality, style, response_format } = body;
       const full = { model, prompt, n, size };
       if (quality) full.quality = quality;

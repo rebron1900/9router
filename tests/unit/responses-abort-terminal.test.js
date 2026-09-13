@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { createDisconnectAwareStream } from "../../open-sse/utils/streamHandler.js";
+import { createDisconnectAwareStream, pipeWithDisconnect } from "../../open-sse/utils/streamHandler.js";
 import { buildAbortedResponsesTerminalBytes } from "../../open-sse/utils/responsesStreamHelpers.js";
 
 // Minimal stream controller stub
-function makeController() {
+function makeController(clientSignal = null) {
   let connected = true;
   return {
     signal: new AbortController().signal,
+    clientSignal,
     startTime: Date.now(),
     isConnected: () => connected,
+    wasClientDisconnected: () => clientSignal?.aborted === true,
     handleComplete: () => { connected = false; },
     handleError: () => { connected = false; },
     handleDisconnect: () => { connected = false; },
@@ -73,5 +75,46 @@ describe("Responses abort terminal synthesis", () => {
     expect(text).not.toContain("[DONE]");
     upstreamController.error(new Error("socket hang up"));
     await expect(reader.read()).rejects.toThrow("socket hang up");
+  });
+});
+
+describe("stream transport errors", () => {
+  it("surfaces ETIMEDOUT from createDisconnectAwareStream", async () => {
+    const timeout = Object.assign(new Error("upstream timed out"), { code: "ETIMEDOUT" });
+    const upstream = new ReadableStream({ start(controller) { controller.error(timeout); } });
+    const out = createDisconnectAwareStream(
+      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+      makeController(),
+      buildAbortedResponsesTerminalBytes,
+    );
+
+    await expect(readAll(out)).rejects.toMatchObject({ code: "ETIMEDOUT" });
+  });
+
+  it("keeps a client ECONNRESET as a graceful close", async () => {
+    const client = new AbortController();
+    client.abort();
+    const reset = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+    const upstream = new ReadableStream({ start(controller) { controller.error(reset); } });
+    const out = createDisconnectAwareStream(
+      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+      makeController(client.signal),
+    );
+
+    await expect(readAll(out)).resolves.toBe("");
+  });
+
+  it("uses the same timeout and reset semantics through pipeWithDisconnect", async () => {
+    const timeout = Object.assign(new Error("upstream timed out"), { code: "ETIMEDOUT" });
+    const upstream = new ReadableStream({ start(controller) { controller.error(timeout); } });
+    const out = pipeWithDisconnect(
+      new Response(upstream),
+      new TransformStream(),
+      makeController(),
+      buildAbortedResponsesTerminalBytes,
+      60_000,
+    );
+
+    await expect(readAll(out)).rejects.toMatchObject({ code: "ETIMEDOUT" });
   });
 });

@@ -23,6 +23,7 @@ const navItems = [
   { href: "/dashboard/images", label: "Image Studio", icon: "brush" },
   // { href: "/dashboard/basic-chat", label: "Basic Chat", icon: "chat" }, // Hidden
   { href: "/dashboard/combos", label: "Combo & Vision Adapter", icon: "layers" },
+  { href: "/dashboard/standard-models", label: "Standard Models", icon: "hub" },
   { href: "/dashboard/usage", label: "Usage", icon: "bar_chart" },
   { href: "/dashboard/quota", label: "Quota Tracker", icon: "data_usage" },
   { href: "/dashboard/token-saver", label: "Token Saver", icon: "savings" },
@@ -36,7 +37,6 @@ const debugItems = [
 ];
 
 const systemItems = [
-  { href: "/dashboard/standard-models", label: "Standard Models", icon: "hub" },
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
   { href: "/dashboard/skills", label: "Skills", icon: "extension" },
 ];

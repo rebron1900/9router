@@ -103,6 +103,34 @@ function normalizeExpiresAt(expiresAt) {
   return date.toISOString();
 }
 
+function awaitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || new Error("Request aborted"));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let onAbort;
+    const cleanup = () => signal.removeEventListener?.("abort", onAbort);
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    onAbort = () => settle(reject, signal.reason || new Error("Request aborted"));
+    signal.addEventListener?.("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    Promise.resolve(promise).then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+  });
+}
+
 /**
  * Providers that carry a real Google project ID.
  * @param {string} provider
@@ -228,6 +256,7 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
   }
 
   const force = options?.force === true;
+  const requestSignal = options?.signal || options?.attemptBudget?.signal || null;
 
   // ── 1. Regular access-token expiry ────────────────────────────────────────
   if (force || _shouldRefreshCredentials(provider, creds)) {
@@ -242,7 +271,10 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
       lastRefreshAt: creds.lastRefreshAt || null,
     });
 
-    const newCreds = await _refreshProviderCredentials(provider, creds, log);
+    const newCreds = await awaitWithAbort(
+      _refreshProviderCredentials(provider, creds, log),
+      requestSignal,
+    );
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,
@@ -283,7 +315,10 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
         expiresIn: copilotToken ? Math.round(remaining / 1000) : "missing",
       });
 
-      const copilotTokenResult = await refreshCopilotToken(creds.accessToken);
+      const copilotTokenResult = await awaitWithAbort(
+        refreshCopilotToken(creds.accessToken),
+        requestSignal,
+      );
       if (copilotTokenResult) {
         const updatedSpecific = {
           ...creds.providerSpecificData,

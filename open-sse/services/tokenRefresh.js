@@ -264,22 +264,36 @@ export async function getAllAccessTokens(userInfo, log) {
   return results;
 }
 
-export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
+export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null, signal = null) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (signal?.aborted) throw signal.reason || new Error("Request aborted");
     if (attempt > 0) {
       const delay = attempt * 1000;
       log?.debug?.("TOKEN_REFRESH", `Retry ${attempt}/${maxRetries} after ${delay}ms`);
-      await new Promise(r => setTimeout(r, delay));
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener?.("abort", onAbort);
+          resolve();
+        }, delay);
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener?.("abort", onAbort);
+          reject(signal.reason || new Error("Request aborted"));
+        };
+        signal?.addEventListener?.("abort", onAbort, { once: true });
+      });
     }
 
     try {
       const result = await refreshFn();
       if (result) return result;
     } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
       log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
     }
   }
 
+  if (signal?.aborted) throw signal.reason || new Error("Request aborted");
   log?.error?.("TOKEN_REFRESH", `All ${maxRetries} retry attempts failed`);
   return null;
 }

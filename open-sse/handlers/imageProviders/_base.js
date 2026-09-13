@@ -3,7 +3,21 @@
 export const POLL_INTERVAL_MS = 1500;
 export const POLL_TIMEOUT_MS = 120000;
 
-export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export function sleep(ms, signal = null) {
+  if (signal?.aborted) return Promise.reject(signal.reason || new Error("Request aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      reject(signal.reason || new Error("Request aborted"));
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
 
 // Map OpenAI size to provider-specific aspect ratio
 export function sizeToAspectRatio(size) {
@@ -19,8 +33,8 @@ export function sizeToAspectRatio(size) {
 }
 
 // Fetch URL → base64 (for providers returning image URLs)
-export async function urlToBase64(url) {
-  const res = await fetch(url);
+export async function urlToBase64(url, options = {}) {
+  const res = options?.signal ? await fetch(url, options) : await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
   const buf = await res.arrayBuffer();
   return Buffer.from(buf).toString("base64");

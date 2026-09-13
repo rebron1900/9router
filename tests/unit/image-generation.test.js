@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleImageGenerationCore } from "../../open-sse/handlers/imageGenerationCore.js";
+import { createStandardRouteBudget } from "../../src/lib/standardModels/runtime.js";
 
 const originalFetch = global.fetch;
 
@@ -583,5 +584,54 @@ describe("handleImageGenerationCore", () => {
 
     expect(result.success).toBe(true);
     expect(onRequestSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the request signal to the provider and returns 499 on client cancellation", async () => {
+    const requestController = new AbortController();
+    global.fetch.mockImplementationOnce(async (_url, options) => {
+      expect(options.signal).toBe(requestController.signal);
+      requestController.abort();
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    });
+
+    const result = await handleImageGenerationCore({
+      body: { prompt: "cancel me" },
+      modelInfo: { provider: "openai", model: "dall-e-3" },
+      credentials: { apiKey: "test-key" },
+      signal: requestController.signal,
+      log: null,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.status).toBe(499);
+  });
+
+  it("counts image provider fetches against the shared standard route budget", async () => {
+    global.fetch.mockResolvedValue(new Response(JSON.stringify({ error: "busy" }), { status: 503 }));
+    const budget = createStandardRouteBudget({ maxAttempts: 1, timeoutMs: 5_000 });
+    try {
+      const first = await handleImageGenerationCore({
+        body: { prompt: "budget me" },
+        modelInfo: { provider: "openai", model: "dall-e-3" },
+        credentials: { apiKey: "test-key" },
+        attemptBudget: budget,
+        log: null,
+      });
+      const second = await handleImageGenerationCore({
+        body: { prompt: "budget me again" },
+        modelInfo: { provider: "openai", model: "dall-e-3" },
+        credentials: { apiKey: "test-key" },
+        attemptBudget: budget,
+        log: null,
+      });
+
+      expect(first.status).toBe(503);
+      expect(second.status).toBe(503);
+      expect(second.error).toContain("Standard route attempt budget exhausted");
+      expect(global.fetch).toHaveBeenCalledOnce();
+      expect(budget.snapshot()).toMatchObject({ attempts: 1, remainingAttempts: 0 });
+    } finally {
+      budget.dispose();
+    }
   });
 });

@@ -11,6 +11,44 @@ function serializeRequestBody(requestBody) {
   return JSON.stringify(requestBody);
 }
 
+function mergeSignals(...signals) {
+  const active = signals.filter(Boolean);
+  if (active.length === 0) return null;
+  if (active.length === 1) return active[0];
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") return AbortSignal.any(active);
+
+  // AbortSignal.any is available in the supported Node runtimes, but keep a
+  // small fallback for Workers/test doubles that only implement the basic
+  // AbortSignal API.
+  const controller = new AbortController();
+  const abort = (signal) => () => controller.abort(signal.reason);
+  for (const signal of active) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener?.("abort", abort(signal), { once: true });
+  }
+  return controller.signal;
+}
+
+function isBudgetError(error, attemptBudget) {
+  return attemptBudget?.isBudgetError?.(error)
+    || attemptBudget?.snapshot?.()?.timedOut
+    || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED";
+}
+
+function isRequestAborted(error, requestSignal) {
+  return requestSignal?.aborted === true
+    || (error?.name === "AbortError" && requestSignal?.aborted === true);
+}
+
+function consumeFetchAttempt(attemptBudget, metadata) {
+  if (!attemptBudget) return;
+  const consumed = attemptBudget.consume?.(metadata);
+  if (consumed && !consumed.allowed) throw attemptBudget.error();
+}
+
 /**
  * Core image generation handler — orchestrator only.
  * Provider-specific URL/headers/body/parse/normalize live in `./imageProviders/{id}.js`.
@@ -22,6 +60,8 @@ function serializeRequestBody(requestBody) {
  * @param {object} [options.log] - Logger
  * @param {boolean} [options.streamToClient] - Pipe SSE to client (codex)
  * @param {boolean} [options.binaryOutput] - Return raw image bytes
+ * @param {AbortSignal} [options.signal] - Client/request cancellation signal
+ * @param {object} [options.attemptBudget] - Request-scoped standard-route budget
  * @param {function} [options.onCredentialsRefreshed]
  * @param {function} [options.onRequestSuccess]
  * @returns {Promise<{ success: boolean, response: Response, status?: number, error?: string }>}
@@ -33,10 +73,13 @@ export async function handleImageGenerationCore({
   log,
   streamToClient = false,
   binaryOutput = false,
+  signal = null,
+  attemptBudget = null,
   onCredentialsRefreshed,
   onRequestSuccess,
 }) {
   const { provider, model } = modelInfo;
+  const executionSignal = mergeSignals(signal, attemptBudget?.signal);
 
   if (!body.prompt) {
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, "Missing required field: prompt");
@@ -54,7 +97,10 @@ export async function handleImageGenerationCore({
   if (adapter.useExecutor && adapter.executeViaExecutor) {
     try {
       log?.debug?.("IMAGE", `${provider.toUpperCase()} | ${model} | prompt="${body.prompt.slice(0, 50)}..." (executor)`);
-      const responseBody = await adapter.executeViaExecutor(model, body, credentials, log);
+      const responseBody = await adapter.executeViaExecutor(model, body, credentials, log, {
+        signal: executionSignal,
+        attemptBudget,
+      });
       if (onRequestSuccess) await onRequestSuccess();
       const normalized = adapter.normalize(responseBody, body.prompt);
       const finalBody = (normalized.created && Array.isArray(normalized.data)) ? normalized : responseBody;
@@ -63,7 +109,14 @@ export async function handleImageGenerationCore({
         const first = finalBody.data?.[0];
         let b64 = first?.b64_json;
         if (!b64 && first?.url) {
-          try { b64 = await urlToBase64(first.url); } catch {}
+          try {
+            b64 = await urlToBase64(first.url, { signal: executionSignal });
+          } catch (error) {
+            if (isRequestAborted(error, signal)) return createErrorResult(499, "Request aborted");
+            if (isBudgetError(error, attemptBudget)) {
+              return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+            }
+          }
         }
         if (b64) {
           const buf = Buffer.from(b64, "base64");
@@ -85,6 +138,12 @@ export async function handleImageGenerationCore({
         }),
       };
     } catch (error) {
+      if (isRequestAborted(error, signal)) {
+        return createErrorResult(499, "Request aborted");
+      }
+      if (isBudgetError(error, attemptBudget)) {
+        return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+      }
       const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
       log?.debug?.("IMAGE", `Executor error: ${errMsg}`);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
@@ -97,9 +156,15 @@ export async function handleImageGenerationCore({
 
   try {
     url = adapter.buildUrl(model, credentials, body);
-    requestBody = await adapter.buildBody(model, body);
+    requestBody = await adapter.buildBody(model, body, { signal: executionSignal, attemptBudget });
     headers = adapter.buildHeaders(credentials, requestBody, model, body);
   } catch (error) {
+    if (isRequestAborted(error, signal)) {
+      return createErrorResult(499, "Request aborted");
+    }
+    if (isBudgetError(error, attemptBudget)) {
+      return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, error.message || `Invalid ${provider} image request`);
   }
 
@@ -107,12 +172,21 @@ export async function handleImageGenerationCore({
 
   let providerResponse;
   try {
-    providerResponse = await fetch(url, {
+    consumeFetchAttempt(attemptBudget, { provider, model, scope: "fetch", url });
+    const fetchOptions = {
       method: "POST",
       headers,
       body: serializeRequestBody(requestBody),
-    });
+    };
+    if (executionSignal) fetchOptions.signal = executionSignal;
+    providerResponse = await fetch(url, fetchOptions);
   } catch (error) {
+    if (isRequestAborted(error, signal)) {
+      return createErrorResult(499, "Request aborted");
+    }
+    if (isBudgetError(error, attemptBudget)) {
+      return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     log?.debug?.("IMAGE", `Fetch error: ${errMsg}`);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
@@ -127,9 +201,14 @@ export async function handleImageGenerationCore({
       providerResponse.status === HTTP_STATUS.FORBIDDEN)
   ) {
     const newCredentials = await refreshWithRetry(
-      () => executor.refreshCredentials(credentials, log),
+      () => executor.refreshCredentials(credentials, log, {
+        signal: executionSignal,
+        attemptBudget,
+        model,
+      }),
       3,
-      log
+      log,
+      executionSignal
     );
 
     if (newCredentials?.accessToken || newCredentials?.apiKey) {
@@ -138,15 +217,22 @@ export async function handleImageGenerationCore({
       if (onCredentialsRefreshed) await onCredentialsRefreshed(newCredentials);
 
       try {
-        const retryBody = await adapter.buildBody(model, body);
+        const retryBody = await adapter.buildBody(model, body, { signal: executionSignal, attemptBudget });
         const retryHeaders = adapter.buildHeaders(credentials, retryBody, model, body);
         const retryUrl = adapter.buildUrl(model, credentials, body);
-        providerResponse = await fetch(retryUrl, {
+        consumeFetchAttempt(attemptBudget, { provider, model, scope: "fetch", url: retryUrl, retry: true });
+        const retryOptions = {
           method: "POST",
           headers: retryHeaders,
           body: serializeRequestBody(retryBody),
-        });
-      } catch {
+        };
+        if (executionSignal) retryOptions.signal = executionSignal;
+        providerResponse = await fetch(retryUrl, retryOptions);
+      } catch (error) {
+        if (isRequestAborted(error, signal)) return createErrorResult(499, "Request aborted");
+        if (isBudgetError(error, attemptBudget)) {
+          return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+        }
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
       }
     } else {
@@ -169,6 +255,8 @@ export async function handleImageGenerationCore({
         headers,
         log,
         streamToClient,
+        signal: executionSignal,
+        attemptBudget,
         onRequestSuccess,
         url,
         requestBody,
@@ -183,6 +271,12 @@ export async function handleImageGenerationCore({
       parsed = await providerResponse.json();
     }
   } catch (parseError) {
+    if (isRequestAborted(parseError, signal)) {
+      return createErrorResult(499, "Request aborted");
+    }
+    if (isBudgetError(parseError, attemptBudget)) {
+      return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+    }
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, parseError.message || `Invalid response from ${provider}`);
   }
 
@@ -199,7 +293,14 @@ export async function handleImageGenerationCore({
     const first = finalBody.data?.[0];
     let b64 = first?.b64_json;
     if (!b64 && first?.url) {
-      try { b64 = await urlToBase64(first.url); } catch {}
+      try {
+        b64 = await urlToBase64(first.url, { signal: executionSignal });
+      } catch (error) {
+        if (isRequestAborted(error, signal)) return createErrorResult(499, "Request aborted");
+        if (isBudgetError(error, attemptBudget)) {
+          return createErrorResult(HTTP_STATUS.SERVICE_UNAVAILABLE, "Standard route attempt budget exhausted");
+        }
+      }
     }
     if (b64) {
       const buf = Buffer.from(b64, "base64");

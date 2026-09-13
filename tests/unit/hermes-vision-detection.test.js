@@ -1,10 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { detectRequiredCapabilities } from "../../open-sse/services/combo.js";
-import { augmentModelsWithCapacityAdapter } from "../../open-sse/services/capacityAdapter.js";
+import { augmentModelsWithCapacityAdapter, getCapacityAdapterConfig } from "../../open-sse/services/capacityAdapter.js";
 import { stripUnsupportedModalities } from "../../open-sse/translator/concerns/modality.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 
 describe("Hermes Vision Image Detection", () => {
+  it("does not invent a fallback model when a capacity pool is empty", () => {
+    expect(getCapacityAdapterConfig("vision", {
+      capacityAdapter: { vision: { enabled: true, models: [] } },
+    })).toEqual({ enabled: true, roundRobin: false, models: [] });
+  });
+
   it("detects vision from Ollama / Hermes images array", () => {
     const body = {
       messages: [

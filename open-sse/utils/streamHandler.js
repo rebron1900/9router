@@ -147,6 +147,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         controller.enqueue(value);
       } catch (error) {
         const wasConnected = streamController.isConnected();
+        const wasClientDisconnected = streamController.wasClientDisconnected?.() === true;
         // Controller already closed = downstream ended; not an upstream error, skip noisy log.
         const msg0 = error?.message || "";
         const isControllerClosed = msg0.includes("already closed") || msg0.includes("Invalid state");
@@ -154,21 +155,25 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         reader.cancel().catch(() => {});
         writer.abort().catch(() => {});
 
-        // Treat network resets / socket hang up / abort as graceful close
-        const msg = error?.message || "";
-        const code = error?.code || error?.cause?.code || "";
+        // Treat client resets / socket hang up / abort as graceful close.
         // Client aborts and transport resets are a graceful close, not a provider
-        // failure. ETIMEDOUT stays separate: an upstream connect/read timeout is a
-        // real provider problem and must keep surfacing as an error.
+        // failure. A timeout is deliberately not included here: an upstream
+        // connect/read timeout is a real provider problem and must keep
+        // surfacing as an error.
         const isNetworkClose =
-          isClientDisconnect(error, { requestSignal: streamController.clientSignal, responseAborted: streamController.wasClientDisconnected?.() === true }) ||
-          msg.includes("ETIMEDOUT") ||
-          code === "ETIMEDOUT";
+          isClientDisconnect(error, { requestSignal: streamController.clientSignal, responseAborted: wasClientDisconnected });
+
+        // A synthesized Responses terminal is appropriate for an abort or the
+        // local stall watchdog. It must not hide an arbitrary provider error;
+        // in particular, ETIMEDOUT must reach the stream consumer as an error.
+        const errorText = String(error?.message || "").toLowerCase();
+        const isAbortLike = error?.name === "AbortError" || errorText.includes("stream stall timeout");
+        const shouldEmitAbortTerminal = onAbortTerminal && (isNetworkClose || isAbortLike);
 
         // Graceful close on network/abort, or when a structured terminal is available
         // (Responses passthrough prefers response.failed + [DONE] over a raw transport error)
         try {
-          if (!wasConnected || isNetworkClose || onAbortTerminal) {
+          if (!wasConnected || isNetworkClose || shouldEmitAbortTerminal) {
             emitTerminal(controller);
             controller.close();
           } else {
