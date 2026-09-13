@@ -16,6 +16,7 @@ import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { isTransientCommandCodeError } from "open-sse/executors/commandcode.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -40,6 +41,28 @@ import {
   getStandardResponseAffinity,
   recordStandardResponseAffinity,
 } from "@/lib/standardModels/runtime";
+
+const COMMANDCODE_TRANSIENT_RETRY_DELAY_MS = 250;
+
+function waitForCommandCodeRetry(signal, delayMs = COMMANDCODE_TRANSIENT_RETRY_DELAY_MS) {
+  if (!delayMs || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer = setTimeout(done, delayMs);
+    const onAbort = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    };
+    function done() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * Keep a standard-route deadline alive for the entire returned Response body.
@@ -460,7 +483,7 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, routeContext = null, capabilityResolver = null) {
+export async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, routeContext = null, capabilityResolver = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -540,6 +563,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastError = null;
   let lastStatus = null;
   let accountAttempts = 0;
+  let commandCodeTransientRetries = 0;
+  let commandCodeRetryConnectionId = null;
 
   while (true) {
     if (routeContext?.attemptBudget && !routeContext.attemptBudget.canAttempt()) {
@@ -555,8 +580,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (routeContext?.signal?.aborted || request?.signal?.aborted) {
       return errorResponse(499, "Request aborted");
     }
+    const retryConnectionId = commandCodeRetryConnectionId;
+    commandCodeRetryConnectionId = null;
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
-      preferredConnectionId: routeContext?.preferredConnectionId || null,
+      preferredConnectionId: retryConnectionId || routeContext?.preferredConnectionId || null,
     });
 
     // All accounts unavailable
@@ -679,6 +706,25 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       || /standard route .*budget|attempt budget exhausted/i.test(String(result.error || ""))
     );
     if (budgetFailure) return result.response;
+
+    // CommandCode may answer with HTTP 200 and then emit a body-level 520/503
+    // gateway error before any model output. Retry that request once on the
+    // same provider path before persisting a 30s model lock. The preflight
+    // stream check guarantees that no client-visible output was committed.
+    const accountAttemptLimit = Number(routeContext?.maxAccountAttempts);
+    const canRetryCommandCode = !Number.isFinite(accountAttemptLimit)
+      || accountAttemptLimit <= 0
+      || accountAttempts < Math.floor(accountAttemptLimit);
+    if (provider === "commandcode"
+      && commandCodeTransientRetries < 1
+      && canRetryCommandCode
+      && isTransientCommandCodeError(result.status, result.error)) {
+      commandCodeTransientRetries += 1;
+      commandCodeRetryConnectionId = credentials.connectionId || credentials.id || null;
+      log.warn("RETRY", `[${provider}/${model}] transient gateway error; retrying once before account lock`);
+      await waitForCommandCodeRetry(routeContext?.signal || request?.signal);
+      continue;
+    }
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;

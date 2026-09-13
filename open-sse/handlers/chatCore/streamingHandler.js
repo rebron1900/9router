@@ -62,9 +62,20 @@ function inspectStreamFailure(chunk) {
       const parsed = JSON.parse(data);
       const error = parsed?.error || parsed?.response?.error;
       if (error || parsed?.type === "error" || parsed?.type === "response.failed" || eventMatch) {
+        const rawStatus = error?.status
+          ?? error?.statusCode
+          ?? error?.status_code
+          ?? error?.httpStatus
+          ?? error?.http_status
+          ?? error?.code
+          ?? parsed?.status
+          ?? parsed?.statusCode
+          ?? parsed?.status_code
+          ?? parsed?.code;
+        const status = Number(rawStatus);
         return {
-          status: Number(error?.status || error?.code) >= 400 ? Number(error.status || error.code) : 502,
-          message: String(error?.message || parsed?.message || "Upstream stream failed"),
+          status: status >= 400 && status <= 599 ? status : 502,
+          message: String(error?.message || error?.error || parsed?.message || parsed?.error || "Upstream stream failed"),
         };
       }
     } catch {
@@ -196,6 +207,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     firstChunk = primed.firstChunk;
     const failure = inspectStreamFailure(firstChunk);
     if (failure) {
+      try { await primed.response?.body?.cancel?.(); } catch { /* upstream may already be closed */ }
       streamController?.handleError?.(new Error(failure.message));
       return createErrorResult(failure.status, failure.message);
     }

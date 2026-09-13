@@ -57,6 +57,12 @@ describe("standard model route runtime", () => {
       shouldFallback: true,
       healthEligible: true,
     });
+    expect(classifyStandardRouteFailure({ status: 520, error: "Invalid error response format: Gateway request failed" })).toMatchObject({
+      category: "transport",
+      shouldFallback: true,
+      retryable: true,
+      healthEligible: true,
+    });
   });
 
   it("enforces a shared attempt budget and request cancellation", () => {

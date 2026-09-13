@@ -3,6 +3,7 @@ import {
   parseCommandCodeError,
   inspectAndWrapCommandCodeResponse,
   CommandCodeExecutor,
+  isTransientCommandCodeError,
 } from "../../open-sse/executors/commandcode.js";
 import { handleComboChat } from "../../open-sse/services/combo.js";
 
@@ -53,6 +54,28 @@ describe("parseCommandCodeError", () => {
     const parsed = parseCommandCodeError(event);
     expect(parsed.statusCode).toBe(401);
     expect(parsed.message).toBe("Unauthorized access");
+  });
+
+  it("handles nested gateway errors and preserves the non-standard 520 status", () => {
+    const parsed = parseCommandCodeError({
+      type: "error",
+      error: {
+        code: "GATEWAY_REQUEST_FAILED",
+        status_code: 520,
+        error: { message: "Invalid error response format: Gateway request failed" },
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      statusCode: 520,
+      message: "Invalid error response format: Gateway request failed",
+    });
+  });
+
+  it("identifies CommandCode gateway failures as safe one-shot retries", () => {
+    expect(isTransientCommandCodeError(520, "Gateway request failed")).toBe(true);
+    expect(isTransientCommandCodeError(503, "Invalid error response format: Gateway request failed")).toBe(true);
+    expect(isTransientCommandCodeError(401, "Gateway request failed")).toBe(false);
   });
 });
 
@@ -136,6 +159,27 @@ describe("inspectAndWrapCommandCodeResponse", () => {
     const sse = await result.text();
     const errorLine = sse.split("\n").find((line) => line.startsWith("data: {") && line.includes('"error"'));
     expect(JSON.parse(errorLine.slice(6)).error.message).toContain("Service temporarily unavailable");
+  });
+
+  it("emits a 520 code for a nested gateway error event", async () => {
+    const ndjsonBody = createNdjsonStream([
+      JSON.stringify({
+        type: "error",
+        error: {
+          status_code: 520,
+          error: { message: "Invalid error response format: Gateway request failed" },
+        },
+      }) + "\n",
+    ]);
+    const result = await inspectAndWrapCommandCodeResponse(new Response(ndjsonBody, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    }), "deepseek/deepseek-v4.1-flash");
+    const sse = await result.text();
+    const errorLine = sse.split("\n").find((line) => line.startsWith("data: {") && line.includes('"error"'));
+    const payload = JSON.parse(errorLine.slice(6));
+    expect(payload.error.code).toBe(520);
+    expect(payload.error.message).toContain("Gateway request failed");
   });
 
   it("streams successful responses when content is emitted", async () => {

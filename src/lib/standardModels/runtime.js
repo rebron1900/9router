@@ -106,7 +106,8 @@ export function classifyStandardRouteFailure({ status, error, phase = "response"
     };
   }
 
-  if (code === 502 || code === 503 || code === 504 || /timeout|timed out|econn|socket|network|fetch failed|bad gateway/.test(text)) {
+  if (code === 502 || code === 503 || code === 504 || code === 520
+    || /timeout|timed out|econn|socket|network|fetch failed|bad gateway|gateway request failed|invalid error response format|upstream gateway/.test(text)) {
     return {
       category: "transport",
       retryable: true,

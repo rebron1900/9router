@@ -69,8 +69,8 @@ export class CommandCodeExecutor extends BaseExecutor {
       parsed = null;
     }
     const errObj = parsed?.error || parsed;
-    const msg = errObj?.message || parsed?.message || bodyText || response.statusText;
-    const status = Number(errObj?.code || errObj?.statusCode || response.status) || response.status;
+    const msg = commandCodeErrorMessage(errObj) || bodyText || response.statusText;
+    const status = commandCodeErrorStatus(errObj) || Number(response.status) || response.status;
     return {
       status,
       message: msg || `CommandCode upstream error: ${response.status}`,
@@ -93,25 +93,19 @@ export function parseCommandCodeError(event) {
   let type = "server_error";
 
   if (typeof errVal === "object" && errVal !== null) {
-    message = errVal.message || errVal.error || JSON.stringify(errVal);
-    if (errVal.statusCode && Number.isInteger(Number(errVal.statusCode))) {
-      statusCode = Number(errVal.statusCode);
-    } else if (errVal.status && Number.isInteger(Number(errVal.status))) {
-      statusCode = Number(errVal.status);
-    }
-    if (errVal.type) type = errVal.type;
+    message = commandCodeErrorMessage(errVal);
+    statusCode = commandCodeErrorStatus(errVal);
+    if (typeof errVal.type === "string" && errVal.type) type = errVal.type;
   } else if (typeof errVal === "string") {
     message = errVal;
   } else {
     message = JSON.stringify(errVal);
   }
 
-  if (event.statusCode && Number.isInteger(Number(event.statusCode))) {
-    statusCode = Number(event.statusCode);
-  }
+  statusCode = commandCodeErrorStatus(event) || statusCode;
 
   if (!statusCode || statusCode < 400 || statusCode > 599) {
-    const lower = message.toLowerCase();
+    const lower = String(message || "").toLowerCase();
     if (lower.includes("rate limit") || lower.includes("too many requests")) {
       statusCode = 429;
       type = "rate_limit_error";
@@ -136,6 +130,53 @@ export function parseCommandCodeError(event) {
   }
 
   return { statusCode, message, type };
+}
+
+/**
+ * CommandCode has returned several error envelopes over time. Keep the
+ * extraction tolerant of nested `error`, snake_case status fields, and code
+ * values that are descriptive strings rather than HTTP numbers.
+ */
+function commandCodeErrorStatus(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 3) return null;
+  for (const key of ["statusCode", "status_code", "httpStatus", "http_status", "status", "code"]) {
+    const numeric = Number(value[key]);
+    if (Number.isInteger(numeric) && numeric >= 400 && numeric <= 599) return numeric;
+  }
+  for (const key of ["error", "details", "response", "data"]) {
+    const nested = commandCodeErrorStatus(value[key], depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function commandCodeErrorMessage(value, depth = 0) {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object" || depth > 3) return String(value);
+  for (const key of ["message", "error", "detail", "reason", "title"]) {
+    const nested = value[key];
+    if (typeof nested === "string" && nested.trim()) return nested;
+    if (nested && typeof nested === "object") {
+      const message = commandCodeErrorMessage(nested, depth + 1);
+      if (message) return message;
+    }
+  }
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/**
+ * A 520 response is Cloudflare's non-standard transient gateway status. The
+ * CommandCode gateway also reports the same condition as a 503 body-level
+ * error with this wording. These failures are safe to retry before locking an
+ * account because no model output has been committed yet.
+ */
+export function isTransientCommandCodeError(status, message) {
+  const code = Number(status) || 0;
+  if (code === 520) return true;
+  if (![502, 503, 504].includes(code)) return false;
+  const text = String(message || "").toLowerCase();
+  return /gateway request failed|invalid error response format|bad gateway|upstream gateway|temporarily unavailable|service unavailable/.test(text);
 }
 
 export function inspectAndWrapCommandCodeResponse(originalResponse, model, imageCount = 0) {
