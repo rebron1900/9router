@@ -16,6 +16,20 @@
   [🇻🇳 Tiếng Việt](./README.vi.md) • [🇨🇳 中文](./README.zh-CN.md) • [🇯🇵 日本語](./README.ja-JP.md)
 </div>
 
+## 🍴 この個人 Fork について
+
+> [!IMPORTANT]
+> このリポジトリは、上流の [decolua/9router](https://github.com/decolua/9router) を基に [rebron1900](https://github.com/rebron1900) が管理する個人 Fork です。上流にはまだない独自機能や互換性修正を含みます。このバージョンに関する報告と入手には、このリポジトリの [Issues](https://github.com/rebron1900/9router/issues) と [Releases](https://github.com/rebron1900/9router/releases) を使用してください。
+
+### Fork 後の主な更新
+
+- **統一モデルルーティング** — 統一モデル名、プロバイダーの割り当て順、プロバイダー別モデルマッピング、能力に応じたルーティング、プロバイダー/モデルの表示をダッシュボードから管理できます。
+- **統一画像ワークスペース** — 1つの UI で画像を生成・編集でき、OpenAI 互換の画像 endpoint と能力で絞り込むモデル検索を提供します。
+- **ルーティングとストリーミングの安定性向上** — 共有リトライ/時間予算、アカウントとプロバイダーの fallback、クライアント切断の正しい処理、長時間の forced-stream リクエストの keepalive、CommandCode の一時的な gateway 障害時の同一アカウント再試行を追加しました。
+- **プロトコルとモデル互換性の拡張** — OpenAI Responses、Chat Completions、Claude の変換を改善し、CommandCode のマルチモーダル対応と runtime routing・`/v1/models` 間の能力判定を統一しました。
+- **使用状況と診断** — より詳細な使用状況分析とリクエスト情報、任意のデバッグログを追加しました。
+- **Fork の Docker リリース** — マルチアーキテクチャ image を [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) へ公開し、各リリースでバージョンタグと `latest` の両方を更新します。
+
 ---
 
 ## 🤔 なぜ9Router？

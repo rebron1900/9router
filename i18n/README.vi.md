@@ -14,6 +14,20 @@
   [🚀 Bắt đầu nhanh](#-quick-start) • [💡 Tính năng](#-key-features) • [📖 Cài đặt](#-setup-guide) • [🌐 Website](https://9router.com)
 </div>
 
+## 🍴 Về bản fork cá nhân này
+
+> [!IMPORTANT]
+> Kho mã này là bản fork cá nhân do [rebron1900](https://github.com/rebron1900) duy trì, dựa trên dự án thượng nguồn [decolua/9router](https://github.com/decolua/9router). Bản fork có các tính năng tùy chỉnh và bản sửa lỗi tương thích có thể chưa có ở thượng nguồn. Hãy dùng [Issues](https://github.com/rebron1900/9router/issues) và [Releases](https://github.com/rebron1900/9router/releases) của kho mã này cho phiên bản này.
+
+### Các cập nhật quan trọng sau khi fork
+
+- **Định tuyến mô hình hợp nhất** — Quản lý tên mô hình hợp nhất, thứ tự liên kết nhà cung cấp, ánh xạ từng mô hình, định tuyến theo khả năng và khả năng hiển thị nhà cung cấp/mô hình trong bảng điều khiển.
+- **Không gian làm việc hình ảnh hợp nhất** — Tạo và chỉnh sửa hình ảnh trong một giao diện, với API hình ảnh tương thích OpenAI và tìm mô hình theo khả năng.
+- **Định tuyến và streaming ổn định hơn** — Ngân sách thử lại/thời gian dùng chung, fallback tài khoản và nhà cung cấp, xử lý đúng việc client ngắt kết nối, keepalive cho yêu cầu forced-stream dài và thử lại cùng tài khoản khi CommandCode gặp lỗi gateway tạm thời.
+- **Tương thích giao thức và mô hình rộng hơn** — Cải thiện chuyển đổi OpenAI Responses, Chat Completions và Claude; hỗ trợ CommandCode đa phương thức; đồng bộ khả năng giữa định tuyến runtime và `/v1/models`.
+- **Sử dụng và chẩn đoán** — Phân tích sử dụng, chi tiết request đầy đủ hơn và log debug tùy chọn.
+- **Bản phát hành Docker của fork** — Image đa kiến trúc được phát hành lên [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); mỗi bản phát hành cập nhật cả tag phiên bản và `latest`.
+
 ---
 
 ## 🤔 Tại sao chọn 9Router?

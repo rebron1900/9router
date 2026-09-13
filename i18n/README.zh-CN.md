@@ -18,6 +18,20 @@
   [🚀 快速开始](#-quick-start) • [💡 特性](#-key-features) • [📖 设置](#-setup) • [🌐 网站](https://9router.com)
 </div>
 
+## 🍴 关于此个人 Fork
+
+> [!IMPORTANT]
+> 本仓库是 [rebron1900](https://github.com/rebron1900) 基于上游项目 [decolua/9router](https://github.com/decolua/9router) 维护的个人 Fork，包含尚未进入上游的定制功能与兼容性修复。使用此版本时，请通过本仓库的 [Issues](https://github.com/rebron1900/9router/issues) 反馈问题，并从 [Releases](https://github.com/rebron1900/9router/releases) 获取版本。
+
+### Fork 后的重要更新
+
+- **统一模型路由** — 在控制台管理统一模型名称、提供商绑定顺序、单独模型映射、能力匹配路由以及提供商和模型的可见性。
+- **统一图像工作台** — 在同一界面生成和编辑图像，提供兼容 OpenAI 的图像接口，并按能力筛选可用模型。
+- **更稳定的路由与流式响应** — 增加共享重试与超时预算、账号和提供商回退、客户端断开识别、长时间强制流式请求保活，以及 CommandCode 临时网关故障的同账号重试。
+- **更广的协议与模型兼容性** — 改进 OpenAI Responses、Chat Completions 与 Claude 格式转换，支持 CommandCode 多模态，并统一运行时路由与 `/v1/models` 的模型能力判断。
+- **用量与诊断** — 提供更完整的用量分析、请求详情和可选调试日志。
+- **Fork Docker 发布** — 多架构镜像发布到 [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router)，每次发布同时更新对应版本标签和 `latest`。
+
 ---
 
 ## 🤔 为什么选择 9Router？

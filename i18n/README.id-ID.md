@@ -16,6 +16,20 @@
   [🇻🇳 Tiếng Việt](./README.vi.md) • [🇨🇳 中文](./README.zh-CN.md) • [🇯🇵 日本語](./README.ja-JP.md) • [🇮🇩 Bahasa Indonesia](./README.id-ID.md)
 </div>
 
+## 🍴 Tentang fork pribadi ini
+
+> [!IMPORTANT]
+> Repositori ini adalah fork pribadi yang dikelola oleh [rebron1900](https://github.com/rebron1900), berdasarkan proyek upstream [decolua/9router](https://github.com/decolua/9router). Fork ini berisi fitur khusus dan perbaikan kompatibilitas yang mungkin belum tersedia di upstream. Gunakan [Issues](https://github.com/rebron1900/9router/issues) dan [Releases](https://github.com/rebron1900/9router/releases) repositori ini untuk versi ini.
+
+### Pembaruan penting sejak fork
+
+- **Perutean model terpadu** — Kelola nama model terpadu, urutan binding provider, pemetaan model per provider, perutean berbasis kemampuan, serta visibilitas provider/model dari dashboard.
+- **Ruang kerja gambar terpadu** — Buat dan edit gambar dalam satu UI, dengan endpoint gambar yang kompatibel dengan OpenAI dan pencarian model yang difilter berdasarkan kemampuan.
+- **Perutean dan streaming yang lebih andal** — Anggaran retry/waktu bersama, fallback akun dan provider, penanganan client disconnect yang benar, keepalive untuk permintaan forced-stream panjang, serta retry pada akun yang sama untuk gangguan gateway CommandCode sementara.
+- **Kompatibilitas protokol dan model yang lebih luas** — Peningkatan translasi OpenAI Responses, Chat Completions, dan Claude; dukungan multimodal CommandCode; serta kemampuan yang konsisten antara runtime routing dan `/v1/models`.
+- **Penggunaan dan diagnostik** — Analitik penggunaan dan detail request yang lebih lengkap, ditambah debug log opsional.
+- **Rilis Docker fork** — Image multi-arsitektur diterbitkan ke [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); setiap rilis memperbarui tag versi dan `latest`.
+
 ---
 
 ## 🤔 Kenapa 9Router?

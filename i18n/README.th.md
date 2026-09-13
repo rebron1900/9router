@@ -20,6 +20,20 @@
   [🚀 เริ่มต้นใช้งาน](#-quick-start) • [💡 ฟีเจอร์](#-key-features) • [📖 การตั้งค่า](#-setup-guide) • [🌐 เว็บไซต์](https://9router.com)
 </div>
 
+## 🍴 เกี่ยวกับ Fork ส่วนบุคคลนี้
+
+> [!IMPORTANT]
+> Repository นี้เป็น fork ส่วนบุคคลที่ดูแลโดย [rebron1900](https://github.com/rebron1900) และพัฒนาต่อจากโปรเจกต์ต้นทาง [decolua/9router](https://github.com/decolua/9router) โดยมีฟีเจอร์เฉพาะและการแก้ไขความเข้ากันได้ที่อาจยังไม่มีในต้นทาง สำหรับเวอร์ชันนี้ โปรดใช้ [Issues](https://github.com/rebron1900/9router/issues) และ [Releases](https://github.com/rebron1900/9router/releases) ของ repository นี้
+
+### การอัปเดตสำคัญหลังจาก Fork
+
+- **การกำหนดเส้นทางโมเดลแบบรวม** — จัดการชื่อโมเดลแบบรวม ลำดับการผูกผู้ให้บริการ การแมปโมเดลรายผู้ให้บริการ การกำหนดเส้นทางตามความสามารถ และการมองเห็นผู้ให้บริการ/โมเดลจากแดชบอร์ด
+- **พื้นที่ทำงานรูปภาพแบบรวม** — สร้างและแก้ไขรูปภาพใน UI เดียว พร้อม endpoint รูปภาพที่เข้ากันได้กับ OpenAI และการค้นหาโมเดลตามความสามารถ
+- **การกำหนดเส้นทางและ streaming ที่เสถียรขึ้น** — มีงบประมาณ retry/timeout ร่วมกัน fallback บัญชีและผู้ให้บริการ จัดการ client disconnect อย่างถูกต้อง keepalive สำหรับ forced-stream ที่ใช้เวลานาน และ retry ด้วยบัญชีเดิมเมื่อ CommandCode พบ gateway error ชั่วคราว
+- **รองรับโปรโตคอลและโมเดลมากขึ้น** — ปรับปรุงการแปลง OpenAI Responses, Chat Completions และ Claude รองรับ CommandCode แบบ multimodal และใช้ข้อมูลความสามารถที่สอดคล้องกันระหว่าง runtime routing กับ `/v1/models`
+- **ข้อมูลการใช้งานและการวินิจฉัย** — เพิ่มรายละเอียดการวิเคราะห์การใช้งาน ข้อมูล request และตัวเลือก debug log
+- **Docker release ของ fork** — เผยแพร่ image หลายสถาปัตยกรรมบน [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) และอัปเดตทั้ง tag เวอร์ชันกับ `latest` ในทุก release
+
 ---
 
 ## 🤔 ทำไมต้อง 9Router?

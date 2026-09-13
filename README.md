@@ -21,6 +21,20 @@
 
 </div>
 
+## 🍴 About This Personal Fork
+
+> [!IMPORTANT]
+> This repository is a personal fork maintained by [rebron1900](https://github.com/rebron1900), based on the upstream [decolua/9router](https://github.com/decolua/9router) project. It includes custom features and compatibility fixes that may not be available upstream. Use this repository's [Issues](https://github.com/rebron1900/9router/issues) and [Releases](https://github.com/rebron1900/9router/releases) for this version.
+
+### Major updates since the fork
+
+- **Unified model routing** — Manage unified model names, ordered provider bindings, per-provider model mappings, capability-aware routing, and provider/model visibility from the dashboard.
+- **Unified image workspace** — Generate and edit images in one UI, with OpenAI-compatible image endpoints and capability-filtered model discovery.
+- **More resilient routing and streaming** — Shared retry/time budgets, account and provider fallback, correct client-disconnect handling, keepalives for long forced-stream requests, and same-account retry for transient CommandCode gateway failures.
+- **Broader protocol and model compatibility** — Improved OpenAI Responses, Chat Completions, and Claude translation; CommandCode multimodal support; and consistent capabilities between runtime routing and `/v1/models`.
+- **Usage and diagnostics** — Richer usage analytics and request details, plus optional debug logging.
+- **Fork Docker releases** — Multi-architecture images are published to [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); each release updates both its version tag and `latest`.
+
 ---
 
 ## 🤔 Why 9Router?
