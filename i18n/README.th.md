@@ -32,7 +32,7 @@
 - **การกำหนดเส้นทางและ streaming ที่เสถียรขึ้น** — มีงบประมาณ retry/timeout ร่วมกัน fallback บัญชีและผู้ให้บริการ จัดการ client disconnect อย่างถูกต้อง keepalive สำหรับ forced-stream ที่ใช้เวลานาน และ retry ด้วยบัญชีเดิมเมื่อ CommandCode พบ gateway error ชั่วคราว
 - **รองรับโปรโตคอลและโมเดลมากขึ้น** — ปรับปรุงการแปลง OpenAI Responses, Chat Completions และ Claude รองรับ CommandCode แบบ multimodal และใช้ข้อมูลความสามารถที่สอดคล้องกันระหว่าง runtime routing กับ `/v1/models`
 - **ข้อมูลการใช้งานและการวินิจฉัย** — เพิ่มรายละเอียดการวิเคราะห์การใช้งาน ข้อมูล request และตัวเลือก debug log
-- **Docker release ของ fork** — เผยแพร่ image หลายสถาปัตยกรรมบน [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) และอัปเดตทั้ง tag เวอร์ชันกับ `latest` ในทุก release
+- **Docker release ของ fork** — เผยแพร่ image AMD64 (`linux/amd64`) บน [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) และอัปเดตทั้ง tag เวอร์ชันกับ `latest` ในทุก release
 
 ---
 

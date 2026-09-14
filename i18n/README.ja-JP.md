@@ -28,7 +28,7 @@
 - **ルーティングとストリーミングの安定性向上** — 共有リトライ/時間予算、アカウントとプロバイダーの fallback、クライアント切断の正しい処理、長時間の forced-stream リクエストの keepalive、CommandCode の一時的な gateway 障害時の同一アカウント再試行を追加しました。
 - **プロトコルとモデル互換性の拡張** — OpenAI Responses、Chat Completions、Claude の変換を改善し、CommandCode のマルチモーダル対応と runtime routing・`/v1/models` 間の能力判定を統一しました。
 - **使用状況と診断** — より詳細な使用状況分析とリクエスト情報、任意のデバッグログを追加しました。
-- **Fork の Docker リリース** — マルチアーキテクチャ image を [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) へ公開し、各リリースでバージョンタグと `latest` の両方を更新します。
+- **Fork の Docker リリース** — AMD64（`linux/amd64`）image を [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) へ公開し、各リリースでバージョンタグと `latest` の両方を更新します。
 
 ---
 

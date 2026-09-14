@@ -33,7 +33,7 @@
 - **مسیریابی و streaming پایدارتر** — بودجه مشترک برای تلاش مجدد و زمان، fallback حساب و ارائه‌دهنده، مدیریت درست قطع اتصال کاربر، keepalive برای درخواست‌های طولانی forced-stream و تلاش مجدد با همان حساب در خطاهای موقت gateway مربوط به CommandCode.
 - **سازگاری گسترده‌تر پروتکل و مدل** — بهبود تبدیل OpenAI Responses، Chat Completions و Claude، پشتیبانی چندوجهی CommandCode و هماهنگی قابلیت‌ها میان مسیریابی runtime و `/v1/models`.
 - **مصرف و عیب‌یابی** — تحلیل کامل‌تر مصرف و جزئیات درخواست‌ها، به‌همراه گزارش اشکال‌زدایی اختیاری.
-- **انتشار Docker فورک** — imageهای چندمعماری در [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) منتشر می‌شوند و هر انتشار، tag نسخه و `latest` را هم‌زمان به‌روزرسانی می‌کند.
+- **انتشار Docker فورک** — imageهای AMD64 (`linux/amd64`) در [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router) منتشر می‌شوند و هر انتشار، tag نسخه و `latest` را هم‌زمان به‌روزرسانی می‌کند.
 
 ---
 

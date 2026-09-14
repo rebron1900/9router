@@ -33,7 +33,7 @@
 - **More resilient routing and streaming** — Shared retry/time budgets, account and provider fallback, correct client-disconnect handling, keepalives for long forced-stream requests, and same-account retry for transient CommandCode gateway failures.
 - **Broader protocol and model compatibility** — Improved OpenAI Responses, Chat Completions, and Claude translation; CommandCode multimodal support; and consistent capabilities between runtime routing and `/v1/models`.
 - **Usage and diagnostics** — Richer usage analytics and request details, plus optional debug logging.
-- **Fork Docker releases** — Multi-architecture images are published to [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); each release updates both its version tag and `latest`.
+- **Fork Docker releases** — AMD64 (`linux/amd64`) images are published to [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); each release updates both its version tag and `latest`.
 
 ---
 

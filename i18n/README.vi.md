@@ -26,7 +26,7 @@
 - **Định tuyến và streaming ổn định hơn** — Ngân sách thử lại/thời gian dùng chung, fallback tài khoản và nhà cung cấp, xử lý đúng việc client ngắt kết nối, keepalive cho yêu cầu forced-stream dài và thử lại cùng tài khoản khi CommandCode gặp lỗi gateway tạm thời.
 - **Tương thích giao thức và mô hình rộng hơn** — Cải thiện chuyển đổi OpenAI Responses, Chat Completions và Claude; hỗ trợ CommandCode đa phương thức; đồng bộ khả năng giữa định tuyến runtime và `/v1/models`.
 - **Sử dụng và chẩn đoán** — Phân tích sử dụng, chi tiết request đầy đủ hơn và log debug tùy chọn.
-- **Bản phát hành Docker của fork** — Image đa kiến trúc được phát hành lên [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); mỗi bản phát hành cập nhật cả tag phiên bản và `latest`.
+- **Bản phát hành Docker của fork** — Image AMD64 (`linux/amd64`) được phát hành lên [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); mỗi bản phát hành cập nhật cả tag phiên bản và `latest`.
 
 ---
 

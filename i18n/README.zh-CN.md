@@ -30,7 +30,7 @@
 - **更稳定的路由与流式响应** — 增加共享重试与超时预算、账号和提供商回退、客户端断开识别、长时间强制流式请求保活，以及 CommandCode 临时网关故障的同账号重试。
 - **更广的协议与模型兼容性** — 改进 OpenAI Responses、Chat Completions 与 Claude 格式转换，支持 CommandCode 多模态，并统一运行时路由与 `/v1/models` 的模型能力判断。
 - **用量与诊断** — 提供更完整的用量分析、请求详情和可选调试日志。
-- **Fork Docker 发布** — 多架构镜像发布到 [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router)，每次发布同时更新对应版本标签和 `latest`。
+- **Fork Docker 发布** — AMD64（`linux/amd64`）镜像发布到 [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router)，每次发布同时更新对应版本标签和 `latest`。
 
 ---
 

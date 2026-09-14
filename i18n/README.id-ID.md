@@ -28,7 +28,7 @@
 - **Perutean dan streaming yang lebih andal** — Anggaran retry/waktu bersama, fallback akun dan provider, penanganan client disconnect yang benar, keepalive untuk permintaan forced-stream panjang, serta retry pada akun yang sama untuk gangguan gateway CommandCode sementara.
 - **Kompatibilitas protokol dan model yang lebih luas** — Peningkatan translasi OpenAI Responses, Chat Completions, dan Claude; dukungan multimodal CommandCode; serta kemampuan yang konsisten antara runtime routing dan `/v1/models`.
 - **Penggunaan dan diagnostik** — Analitik penggunaan dan detail request yang lebih lengkap, ditambah debug log opsional.
-- **Rilis Docker fork** — Image multi-arsitektur diterbitkan ke [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); setiap rilis memperbarui tag versi dan `latest`.
+- **Rilis Docker fork** — Image AMD64 (`linux/amd64`) diterbitkan ke [GHCR](https://github.com/rebron1900/9router/pkgs/container/9router); setiap rilis memperbarui tag versi dan `latest`.
 
 ---
 
