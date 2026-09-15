@@ -54,9 +54,19 @@ export function extractUsageFromResponse(responseBody) {
     return {
       prompt_tokens: responseBody.usage.input_tokens || 0,
       completion_tokens: responseBody.usage.output_tokens || 0,
-      cached_tokens: responseBody.usage.cached_tokens ?? responseBody.usage.input_tokens_details?.cached_tokens,
+      cached_tokens:
+        responseBody.usage.cached_tokens ??
+        responseBody.usage.input_tokens_details?.cached_tokens ??
+        responseBody.usage.prompt_cache_hit_tokens,
       cache_read_input_tokens: responseBody.usage.cache_read_input_tokens,
-      cache_creation_input_tokens: responseBody.usage.cache_creation_input_tokens
+      cache_creation_input_tokens:
+        responseBody.usage.cache_creation_input_tokens ??
+        responseBody.usage.cache_write_input_tokens ??
+        responseBody.usage.input_tokens_details?.cache_write_tokens ??
+        responseBody.usage.input_tokens_details?.cache_creation_tokens ??
+        responseBody.usage.cache_write_tokens,
+      reasoning_tokens: responseBody.usage.output_tokens_details?.reasoning_tokens,
+      input_tokens_details: responseBody.usage.input_tokens_details
     };
   }
 
@@ -65,7 +75,19 @@ export function extractUsageFromResponse(responseBody) {
     return {
       prompt_tokens: responseBody.usage.prompt_tokens || 0,
       completion_tokens: responseBody.usage.completion_tokens || 0,
-      cached_tokens: responseBody.usage.cached_tokens ?? responseBody.usage.prompt_tokens_details?.cached_tokens,
+      cached_tokens:
+        responseBody.usage.cached_tokens ??
+        responseBody.usage.prompt_tokens_details?.cached_tokens ??
+        responseBody.usage.prompt_cache_hit_tokens ??
+        responseBody.usage.cache_read_input_tokens,
+      cache_creation_input_tokens:
+        responseBody.usage.cache_creation_input_tokens ??
+        responseBody.usage.cache_write_input_tokens ??
+        responseBody.usage.prompt_tokens_details?.cache_write_tokens ??
+        responseBody.usage.prompt_tokens_details?.cache_creation_tokens ??
+        responseBody.usage.cache_write_tokens,
+      prompt_cache_hit_tokens: responseBody.usage.prompt_cache_hit_tokens,
+      prompt_cache_miss_tokens: responseBody.usage.prompt_cache_miss_tokens,
       reasoning_tokens: responseBody.usage.completion_tokens_details?.reasoning_tokens
     };
   }
@@ -75,7 +97,7 @@ export function extractUsageFromResponse(responseBody) {
   if (usageMetadata) {
     return {
       prompt_tokens: usageMetadata.promptTokenCount || 0,
-      completion_tokens: usageMetadata.candidatesTokenCount || 0,
+      completion_tokens: (usageMetadata.candidatesTokenCount || 0) + (usageMetadata.thoughtsTokenCount || 0),
       cached_tokens: usageMetadata.cachedContentTokenCount || 0,
       reasoning_tokens: usageMetadata.thoughtsTokenCount || 0
     };
@@ -85,6 +107,7 @@ export function extractUsageFromResponse(responseBody) {
 }
 
 export function buildRequestDetail(base, overrides = {}) {
+  const normalizedTokens = canonicalizeUsage(base.tokens) || base.tokens;
   return {
     requestId: base.requestId || undefined,
     provider: base.provider || "unknown",
@@ -92,7 +115,7 @@ export function buildRequestDetail(base, overrides = {}) {
     connectionId: base.connectionId || undefined,
     timestamp: new Date().toISOString(),
     latency: base.latency || { ttft: 0, total: 0 },
-    tokens: base.tokens || { prompt_tokens: 0, completion_tokens: 0 },
+    tokens: normalizedTokens || { prompt_tokens: 0, completion_tokens: 0 },
     request: base.request,
     providerRequest: base.providerRequest || null,
     providerResponse: base.providerResponse || null,
@@ -105,7 +128,11 @@ export function buildRequestDetail(base, overrides = {}) {
 
 // Build the "done" summary: duration, ttft, in/out tokens with cache breakdown
 export function formatDoneLine({ usage, latency }) {
-  const u = usage || {};
+  const isGeminiNative = usage && typeof usage === "object"
+    && (usage.promptTokenCount !== undefined || usage.candidatesTokenCount !== undefined
+      || usage.totalTokenCount !== undefined || usage.cachedContentTokenCount !== undefined
+      || usage.thoughtsTokenCount !== undefined);
+  const u = (isGeminiNative ? canonicalizeUsage(usage) : usage) || {};
   const inTok = u.prompt_tokens ?? u.input_tokens ?? 0;
   const outTok = u.completion_tokens ?? u.output_tokens ?? 0;
   const cacheRead = u.cache_read_input_tokens ?? u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
@@ -124,8 +151,15 @@ export function formatDoneLine({ usage, latency }) {
 export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, requestId, label = "USAGE", silent = false }) {
   if (!tokens || typeof tokens !== "object") return;
 
-  const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
-  const outTokens = tokens.output_tokens ?? tokens.completion_tokens ?? 0;
+  // Normalize before the zero-token guard so Gemini-native estimates
+  // (promptTokenCount/candidatesTokenCount) are persisted like all other
+  // provider usage shapes.
+  const normalized = canonicalizeUsage(tokens) || {
+    prompt_tokens: tokens.prompt_tokens ?? tokens.input_tokens ?? 0,
+    completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
+  };
+  const inTokens = normalized.input_tokens ?? normalized.prompt_tokens ?? 0;
+  const outTokens = normalized.output_tokens ?? normalized.completion_tokens ?? 0;
 
   if (inTokens === 0 && outTokens === 0) return;
 
@@ -137,11 +171,6 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
 
   // Canonicalize to one storage convention (prompt_tokens cache-inclusive) so
   // cached/cache-creation tokens survive to cost calc + stats. See canonicalizeUsage.
-  const normalized = canonicalizeUsage(tokens) || {
-    prompt_tokens: tokens.prompt_tokens ?? tokens.input_tokens ?? 0,
-    completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
-  };
-
   return saveRequestUsage({
     provider: provider || "unknown",
     model: model || "unknown",

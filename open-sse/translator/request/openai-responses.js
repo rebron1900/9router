@@ -281,6 +281,15 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   }
   if (customToolNames.size > 0) result._customToolNames = [...customToolNames];
 
+  // Chat Completions only emits its terminal usage chunk when the caller opts
+  // into stream_options.include_usage. Responses clients expect usage on the
+  // completed event, so request it whenever this bridge targets a streaming
+  // Chat upstream. Providers that do not need it can still override the
+  // caller's explicit stream_options value.
+  if (stream && result.messages && !result.stream_options) {
+    result.stream_options = { include_usage: true };
+  }
+
   // Cleanup Responses API specific fields
   // Map Responses-only max_output_tokens to Chat max_tokens (avoid leaking unknown field upstream)
   if (result.max_output_tokens !== undefined) {

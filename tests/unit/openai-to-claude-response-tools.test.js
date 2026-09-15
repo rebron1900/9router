@@ -59,3 +59,51 @@ describe("openaiToClaudeResponse tool argument sanitization", () => {
     });
   });
 });
+
+describe("openaiToClaudeResponse usage framing", () => {
+  it("captures cache usage from a terminal choices-empty chunk", () => {
+    const state = createState();
+
+    const events = openaiToClaudeResponse({
+      id: "chatcmpl-usage-only",
+      model: "test-model",
+      choices: [],
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        input_tokens_details: { cached_tokens: 480 },
+      },
+    }, state);
+
+    expect(events).toBeNull();
+    expect(state.usage).toEqual({
+      input_tokens: 20,
+      output_tokens: 20,
+      cache_read_input_tokens: 480,
+    });
+  });
+
+  it("holds the Claude terminal until a later usage-only chunk arrives", () => {
+    const state = createState();
+    openaiToClaudeResponse({
+      id: "chatcmpl-delayed-usage",
+      model: "test-model",
+      choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+    }, state);
+
+    const events = openaiToClaudeResponse({
+      id: "chatcmpl-delayed-usage",
+      model: "test-model",
+      choices: [],
+      usage: { prompt_tokens: 500, completion_tokens: 20, cached_tokens: 480 },
+    }, state);
+    const messageDelta = events?.find((event) => event.type === "message_delta");
+
+    expect(messageDelta?.usage).toEqual({
+      input_tokens: 20,
+      output_tokens: 20,
+      cache_read_input_tokens: 480,
+    });
+    expect(events?.at(-1)?.type).toBe("message_stop");
+  });
+});

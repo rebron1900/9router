@@ -36,6 +36,13 @@ export function parseSSELine(line, format = null) {
 // Check if chunk has valuable content (not empty)
 export function hasValuableContent(chunk, format) {
   // OpenAI format
+  if (format === FORMATS.OPENAI && chunk.usage && typeof chunk.usage === "object") {
+    // OpenAI-compatible providers may put the authoritative usage (including
+    // cache counters) in a terminal chunk with choices: []. Keep that chunk
+    // visible to both the usage tracker and the client instead of treating it
+    // as an empty delta.
+    return true;
+  }
   if (format === FORMATS.OPENAI && chunk.choices?.[0]?.delta) {
     const delta = chunk.choices[0].delta;
     return delta.content && delta.content !== "" ||

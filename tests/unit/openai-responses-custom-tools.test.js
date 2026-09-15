@@ -41,6 +41,7 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     });
     expect(out._customToolNames).toEqual(["exec"]);
     expect(out.messages.some((message) => message.role === "developer")).toBe(false);
+    expect(out.stream_options).toEqual({ include_usage: true });
   });
 
   it("translates custom tool call/output history into Chat assistant/tool messages", () => {
@@ -149,5 +150,51 @@ describe("OpenAI Chat stream → Codex custom_tool_call", () => {
       name: "search",
       arguments: "{\"q\":\"x\"}",
     });
+  });
+
+  it("includes cache and reasoning usage on response.completed", () => {
+    const state = initState(FORMATS.OPENAI_RESPONSES);
+    const events = [
+      {
+        id: "chatcmpl-usage",
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: null }],
+      },
+      {
+        id: "chatcmpl-usage",
+        usage: {
+          prompt_tokens: 1000,
+          prompt_cache_hit_tokens: 800,
+          prompt_cache_miss_tokens: 200,
+          completion_tokens: 80,
+          completion_tokens_details: { reasoning_tokens: 60 },
+          total_tokens: 1080,
+        },
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      },
+    ].flatMap((chunk) => openaiToOpenAIResponsesResponse(chunk, state));
+
+    const completed = events.find((event) => event.event === "response.completed");
+    expect(completed.data.response.usage).toEqual({
+      input_tokens: 1000,
+      input_tokens_details: { cached_tokens: 800 },
+      output_tokens: 80,
+      output_tokens_details: { reasoning_tokens: 60 },
+      total_tokens: 1080,
+    });
+  });
+
+  it("waits for a usage-only chunk after the finish chunk", () => {
+    const state = initState(FORMATS.OPENAI_RESPONSES);
+    const finishEvents = openaiToOpenAIResponsesResponse({
+      id: "chatcmpl-tail",
+      choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+    }, state);
+    expect(finishEvents.some((event) => event.event === "response.completed")).toBe(false);
+
+    const tailEvents = openaiToOpenAIResponsesResponse({
+      usage: { prompt_tokens: 500, prompt_cache_hit_tokens: 400, completion_tokens: 20, total_tokens: 520 },
+    }, state);
+    const completed = tailEvents.find((event) => event.event === "response.completed");
+    expect(completed.data.response.usage.input_tokens_details.cached_tokens).toBe(400);
   });
 });

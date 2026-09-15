@@ -35,6 +35,25 @@ export function addBufferToUsage(usage) {
 
   const result = { ...usage };
 
+  // Provider-reported cache-aware usage is authoritative. The headroom buffer
+  // would corrupt cache-hit-rate denominators, so leave those counters intact.
+  // Keep the historical buffer for plain usage objects with no cache metadata;
+  // it remains a compatibility headroom for providers that expose no cache
+  // accounting at all.
+  const hasCacheMetadata = result.cached_tokens !== undefined
+    || result.cache_read_input_tokens !== undefined
+    || result.cache_creation_input_tokens !== undefined
+    || result.cache_write_input_tokens !== undefined
+    || result.prompt_cache_hit_tokens !== undefined
+    || result.prompt_cache_miss_tokens !== undefined
+    || result.prompt_tokens_details !== undefined
+    || result.input_tokens_details !== undefined
+    // Gemini-native cache accounting lives directly on usageMetadata; without
+    // this check a cache-aware Gemini usage got the prompt headroom buffer on
+    // top, inflating the denominator and diluting the cache-hit rate.
+    || result.cachedContentTokenCount !== undefined;
+  if (result.estimated !== true && hasCacheMetadata) return result;
+
   // Claude format
   if (result.input_tokens !== undefined) {
     result.input_tokens += BUFFER_TOKENS;
@@ -45,9 +64,16 @@ export function addBufferToUsage(usage) {
     result.prompt_tokens += BUFFER_TOKENS;
   }
 
+  // Gemini native usageMetadata format
+  if (result.promptTokenCount !== undefined) {
+    result.promptTokenCount += BUFFER_TOKENS;
+  }
+
   // Calculate or update total_tokens
   if (result.total_tokens !== undefined) {
     result.total_tokens += BUFFER_TOKENS;
+  } else if (result.totalTokenCount !== undefined) {
+    result.totalTokenCount += BUFFER_TOKENS;
   } else if (result.prompt_tokens !== undefined && result.completion_tokens !== undefined) {
     // Calculate total_tokens if not exists
     result.total_tokens = result.prompt_tokens + result.completion_tokens;
@@ -83,7 +109,7 @@ export function filterUsageForFormat(usage, targetFormat) {
       'estimated'
     ],
     [FORMATS.OPENAI_RESPONSES]: [
-      'input_tokens', 'output_tokens',
+      'input_tokens', 'output_tokens', 'total_tokens',
       'input_tokens_details', 'output_tokens_details',
       'estimated'
     ],
@@ -129,15 +155,24 @@ export function normalizeUsage(usage) {
   assignNumber("total_tokens", usage?.total_tokens);
   assignNumber("cache_read_input_tokens", usage?.cache_read_input_tokens);
   assignNumber("cache_creation_input_tokens", usage?.cache_creation_input_tokens);
+  assignNumber("cache_write_input_tokens", usage?.cache_write_input_tokens);
   assignNumber("cached_tokens", usage?.cached_tokens);
+  assignNumber("prompt_cache_hit_tokens", usage?.prompt_cache_hit_tokens);
+  assignNumber("prompt_cache_miss_tokens", usage?.prompt_cache_miss_tokens);
   assignNumber("reasoning_tokens", usage?.reasoning_tokens);
 
   // Preserve nested details objects for OpenAI format forwarding
   if (usage?.prompt_tokens_details && typeof usage.prompt_tokens_details === "object") {
     normalized.prompt_tokens_details = usage.prompt_tokens_details;
   }
+  if (usage?.input_tokens_details && typeof usage.input_tokens_details === "object") {
+    normalized.input_tokens_details = usage.input_tokens_details;
+  }
   if (usage?.completion_tokens_details && typeof usage.completion_tokens_details === "object") {
     normalized.completion_tokens_details = usage.completion_tokens_details;
+  }
+  if (usage?.output_tokens_details && typeof usage.output_tokens_details === "object") {
+    normalized.output_tokens_details = usage.output_tokens_details;
   }
 
   if (Object.keys(normalized).length === 0) return null;
@@ -165,13 +200,56 @@ export function canonicalizeUsage(usage) {
   if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
 
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+  // Gemini/Antigravity native usageMetadata is the wire shape used by the
+  // format-specific estimate path. Normalize it at the storage boundary so
+  // request details, usage history, and cost calculation do not see 0 tokens.
+  const hasGeminiNativeFields = usage.promptTokenCount !== undefined
+    || usage.candidatesTokenCount !== undefined
+    || usage.totalTokenCount !== undefined
+    || usage.cachedContentTokenCount !== undefined
+    || usage.thoughtsTokenCount !== undefined;
+  if (hasGeminiNativeFields) {
+    const prompt = num(usage.promptTokenCount);
+    const thoughts = num(usage.thoughtsTokenCount);
+    let candidates = num(usage.candidatesTokenCount);
+    const reportedTotal = num(usage.totalTokenCount);
+    if (candidates === 0 && reportedTotal > 0) {
+      candidates = Math.max(0, reportedTotal - prompt - thoughts);
+    }
+    const completion = candidates + thoughts;
+    const cached = num(usage.cachedContentTokenCount);
+    const result = {
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: prompt + completion,
+      cached_tokens: cached,
+      cache_creation_input_tokens: 0,
+    };
+    if (thoughts > 0) result.reasoning_tokens = thoughts;
+    return result;
+  }
+
   const completion = num(usage.completion_tokens ?? usage.output_tokens);
-  const reasoning = num(usage.reasoning_tokens);
+  // reasoning_tokens is a SUBSET of completion/output tokens in every format we
+  // emit (OpenAI completion_tokens_details, Responses output_tokens_details,
+  // Gemini thoughtsTokenCount folded into completion_tokens) — read the detail
+  // objects too so buildUsage()-shaped usage keeps its reasoning split.
+  // num() maps absent to 0, so pick the first counter that is actually > 0.
+  const reasoning = [usage.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens, usage.output_tokens_details?.reasoning_tokens]
+    .map(num)
+    .find((value) => value > 0) ?? 0;
   // Fall back to the nested prompt_tokens_details.cache_creation_tokens shape
   // (buildUsage()'s OpenAI-forwarding format) when the top-level field is
   // absent, so callers that pass a buildUsage() object through don't silently
   // drop cache_creation.
-  const cacheCreation = num(usage.cache_creation_input_tokens ?? usage.prompt_tokens_details?.cache_creation_tokens);
+  const cacheCreation = num(
+    usage.cache_creation_input_tokens ??
+    usage.cache_write_input_tokens ??
+    usage.prompt_tokens_details?.cache_write_tokens ??
+    usage.prompt_tokens_details?.cache_creation_tokens ??
+    usage.input_tokens_details?.cache_write_tokens,
+  );
 
   let prompt = num(usage.prompt_tokens ?? usage.input_tokens);
   let cached;
@@ -184,8 +262,17 @@ export function canonicalizeUsage(usage) {
   // Guard on the absence of `cached_tokens`: our own canonical output always
   // sets that key (even to 0), so re-running canonicalizeUsage on an already-
   // folded result takes the passthrough branch instead of folding again.
-  if (usage.cached_tokens === undefined &&
-      (usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined)) {
+  const hasInclusiveCacheDetails =
+    usage.prompt_tokens_details?.cached_tokens !== undefined ||
+    usage.prompt_tokens_details?.cache_write_tokens !== undefined ||
+    usage.prompt_tokens_details?.cache_creation_tokens !== undefined ||
+    usage.input_tokens_details?.cached_tokens !== undefined ||
+    usage.input_tokens_details?.cache_write_tokens !== undefined ||
+    usage.input_tokens_details?.cache_creation_tokens !== undefined;
+  if (!hasInclusiveCacheDetails && usage.cached_tokens === undefined &&
+      (usage.cache_read_input_tokens !== undefined
+        || usage.cache_creation_input_tokens !== undefined
+        || usage.cache_write_input_tokens !== undefined)) {
     cached = num(usage.cache_read_input_tokens);
     prompt = prompt + cached + cacheCreation;
   } else {
@@ -193,7 +280,12 @@ export function canonicalizeUsage(usage) {
     // Mirror the cacheCreation fallback above: buildUsage() only ever emits the
     // nested prompt_tokens_details.cached_tokens shape, so without this the
     // cache-read count is silently dropped on every buildUsage()-derived usage.
-    cached = num(usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens);
+    cached = num(
+      usage.cached_tokens ??
+      usage.prompt_tokens_details?.cached_tokens ??
+      usage.input_tokens_details?.cached_tokens ??
+      usage.prompt_cache_hit_tokens,
+    );
   }
 
   const result = {
@@ -265,23 +357,52 @@ export function extractUsage(chunk) {
   // OpenAI Responses API format (response.completed or response.done)
   if ((chunk.type === "response.completed" || chunk.type === "response.done") && chunk.response?.usage && typeof chunk.response.usage === "object") {
     const usage = chunk.response.usage;
-    const cachedTokens = usage.input_tokens_details?.cached_tokens;
+    const cachedTokens = usage.input_tokens_details?.cached_tokens
+      ?? usage.cached_tokens
+      ?? usage.prompt_cache_hit_tokens
+      ?? usage.cache_read_input_tokens;
+    const cacheWriteTokens = usage.input_tokens_details?.cache_write_tokens
+      ?? usage.input_tokens_details?.cache_creation_tokens
+      ?? usage.cache_creation_input_tokens
+      ?? usage.cache_write_input_tokens
+      ?? usage.cache_write_tokens;
     return normalizeUsage({
-      prompt_tokens: usage.input_tokens || usage.prompt_tokens || 0,
-      completion_tokens: usage.output_tokens || usage.completion_tokens || 0,
+      prompt_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
+      completion_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
       cached_tokens: cachedTokens,
-      reasoning_tokens: usage.output_tokens_details?.reasoning_tokens,
-      prompt_tokens_details: cachedTokens ? { cached_tokens: cachedTokens } : undefined
+      cache_creation_input_tokens: cacheWriteTokens,
+      reasoning_tokens: usage.output_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens,
+      prompt_tokens_details: cachedTokens ? { cached_tokens: cachedTokens } : undefined,
+      input_tokens_details: usage.input_tokens_details
     });
   }
 
   // OpenAI format (also covers DeepSeek which uses prompt_cache_hit_tokens)
-  if (chunk.usage && typeof chunk.usage === "object" && chunk.usage.prompt_tokens !== undefined) {
+  if (chunk.usage && typeof chunk.usage === "object"
+      && (chunk.usage.prompt_tokens !== undefined || chunk.usage.input_tokens !== undefined)) {
     return normalizeUsage({
-      prompt_tokens: chunk.usage.prompt_tokens,
-      completion_tokens: chunk.usage.completion_tokens || 0,
-      cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens || chunk.usage.prompt_cache_hit_tokens,
-      reasoning_tokens: chunk.usage.completion_tokens_details?.reasoning_tokens,
+      prompt_tokens: chunk.usage.prompt_tokens ?? chunk.usage.input_tokens,
+      completion_tokens: chunk.usage.completion_tokens ?? chunk.usage.output_tokens ?? 0,
+      cached_tokens:
+        chunk.usage.prompt_tokens_details?.cached_tokens ??
+        chunk.usage.input_tokens_details?.cached_tokens ??
+        chunk.usage.prompt_cache_hit_tokens ??
+        chunk.usage.cache_read_input_tokens ??
+        chunk.usage.cached_tokens,
+      prompt_cache_hit_tokens: chunk.usage.prompt_cache_hit_tokens,
+      prompt_cache_miss_tokens: chunk.usage.prompt_cache_miss_tokens,
+      cache_creation_input_tokens:
+        chunk.usage.prompt_tokens_details?.cache_write_tokens ??
+        chunk.usage.prompt_tokens_details?.cache_creation_tokens ??
+        chunk.usage.input_tokens_details?.cache_write_tokens ??
+        chunk.usage.input_tokens_details?.cache_creation_tokens ??
+        chunk.usage.cache_creation_input_tokens ??
+        chunk.usage.cache_write_input_tokens ??
+        chunk.usage.cache_write_tokens,
+      reasoning_tokens:
+        chunk.usage.completion_tokens_details?.reasoning_tokens ??
+        chunk.usage.output_tokens_details?.reasoning_tokens ??
+        chunk.usage.reasoning_tokens,
       prompt_tokens_details: chunk.usage.prompt_tokens_details,
       completion_tokens_details: chunk.usage.completion_tokens_details
     });
@@ -293,7 +414,7 @@ export function extractUsage(chunk) {
   if (usageMeta && typeof usageMeta === "object") {
     return normalizeUsage({
       prompt_tokens: usageMeta.promptTokenCount || 0,
-      completion_tokens: usageMeta.candidatesTokenCount || 0,
+      completion_tokens: (usageMeta.candidatesTokenCount || 0) + (usageMeta.thoughtsTokenCount || 0),
       total_tokens: usageMeta.totalTokenCount,
       cached_tokens: usageMeta.cachedContentTokenCount,
       reasoning_tokens: usageMeta.thoughtsTokenCount
@@ -375,6 +496,30 @@ export function formatUsage(inputTokens, outputTokens, targetFormat) {
       input_tokens: inputTokens, 
       output_tokens: outputTokens, 
       estimated: true 
+    });
+  }
+
+  // Responses API uses input/output token names and keeps cache details under
+  // input_tokens_details. Estimates have no cache breakdown, but must still be
+  // serializable instead of being filtered down to { estimated: true }.
+  if (targetFormat === FORMATS.OPENAI_RESPONSES || targetFormat === FORMATS.OPENAI_RESPONSE) {
+    return addBufferToUsage({
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+      estimated: true
+    });
+  }
+
+  // Gemini-family clients use the native usageMetadata names. Keep estimates
+  // visible for these clients too when the upstream omits usage entirely.
+  if (targetFormat === FORMATS.GEMINI || targetFormat === FORMATS.GEMINI_CLI
+      || targetFormat === FORMATS.ANTIGRAVITY || targetFormat === FORMATS.VERTEX) {
+    return addBufferToUsage({
+      promptTokenCount: inputTokens,
+      candidatesTokenCount: outputTokens,
+      totalTokenCount: inputTokens + outputTokens,
+      estimated: true
     });
   }
 

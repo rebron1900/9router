@@ -1,3 +1,11 @@
+# v0.5.80 (2026-09-15)
+
+## Fixes
+- **Usage**: preserve cache read/write and reasoning metadata across provider formats, including Gemini, Antigravity, Responses, Claude, and CommandCode.
+- **Streaming**: inject terminal usage estimates when providers omit trailers and persist native Gemini usage correctly.
+- **Routing**: unify model discovery for `/v1beta/models` and resolve dynamic model info consistently.
+- **Stability**: prevent HMR from accumulating shutdown listeners.
+
 # v0.5.79 (2026-09-13)
 
 ## Features

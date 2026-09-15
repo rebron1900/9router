@@ -139,6 +139,42 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     }
   });
 
+  it("forwards DeepSeek cache hits to Responses usage", () => {
+    const body = {
+      ...CHAT_TOOL_BODY,
+      usage: {
+        prompt_tokens: 1000,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+        completion_tokens: 50,
+        total_tokens: 1050,
+      },
+    };
+    const out = translateNonStreamingResponse(body, FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES);
+    expect(out.usage).toMatchObject({
+      input_tokens: 1000,
+      output_tokens: 50,
+      total_tokens: 1050,
+      input_tokens_details: { cached_tokens: 800 },
+    });
+  });
+
+  it("forwards cache writes and reasoning details without treating misses as writes", () => {
+    const body = {
+      ...CHAT_TOOL_BODY,
+      usage: {
+        prompt_tokens: 1000,
+        prompt_tokens_details: { cached_tokens: 700, cache_write_tokens: 100 },
+        completion_tokens: 80,
+        completion_tokens_details: { reasoning_tokens: 60 },
+        total_tokens: 1080,
+      },
+    };
+    const out = translateNonStreamingResponse(body, FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES);
+    expect(out.usage.input_tokens_details).toEqual({ cached_tokens: 700, cache_write_tokens: 100 });
+    expect(out.usage.output_tokens_details).toEqual({ reasoning_tokens: 60 });
+  });
+
   it("keeps a delayed forced stream alive with JSON-safe whitespace", async () => {
     vi.useFakeTimers();
     try {

@@ -1,6 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { PROVIDERS } from "../config/providers.js";
+import { toOpenAIChatUsage } from "../translator/concerns/usage.js";
 
 // Trae executor — SOLO remote agent API.
 //
@@ -268,11 +269,9 @@ export default class TraeExecutor extends BaseExecutor {
                   created,
                   model,
                   choices: [],
-                  usage: {
-                    prompt_tokens: usage.prompt_tokens || 0,
-                    completion_tokens: usage.completion_tokens || 0,
-                    total_tokens: usage.total_tokens || 0,
-                  },
+                  // Keep provider-native cache details (when Trae adds them)
+                  // instead of rebuilding usage from only the three base counts.
+                  usage: toOpenAIChatUsage(usage),
                 });
               }
             }
@@ -325,11 +324,8 @@ export default class TraeExecutor extends BaseExecutor {
       choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
     };
     if (usage) {
-      out.usage = {
-        prompt_tokens: usage.prompt_tokens || 0,
-        completion_tokens: usage.completion_tokens || 0,
-        total_tokens: usage.total_tokens || 0,
-      };
+      // Keep cache-read/cache-write counters for non-streaming callers too.
+      out.usage = toOpenAIChatUsage(usage);
     }
     return {
       response: new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } }),

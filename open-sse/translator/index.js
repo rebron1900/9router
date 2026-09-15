@@ -265,6 +265,7 @@ export function initState(sourceFormat) {
       funcArgsDone: {},
       funcItemDone: {},
       customToolNames: new Set(),
+      pendingCompletion: false,
       completedSent: false
     };
   }

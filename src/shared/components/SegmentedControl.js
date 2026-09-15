@@ -26,9 +26,10 @@ export default function SegmentedControl({
       {options.map((option) => (
         <button
           key={option.value}
+          type="button"
           onClick={() => onChange(option.value)}
           className={cn(
-            "shrink-0 px-4 rounded-[8px] font-medium transition-all",
+            "inline-flex shrink-0 items-center justify-center px-4 rounded-[8px] font-medium transition-all",
             sizes[size],
             value === option.value
               ? "bg-surface text-text-main shadow-sm"

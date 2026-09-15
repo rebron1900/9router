@@ -5,7 +5,7 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { buildChunk } from "../concerns/chunk.js";
-import { buildUsage } from "../concerns/usage.js";
+import { buildUsage, toResponsesUsage, readCachedTokens, readCacheWriteTokens } from "../concerns/usage.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
@@ -18,8 +18,55 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!chunk) {
     return flushEvents(state);
   }
-  
-  if (!chunk.choices?.length) return [];
+
+  // Capture a complete usage-bearing Chat chunk before looking at choices.
+  // This covers both DeepSeek's finish chunk and OpenAI-compatible
+  // usage-only chunks that arrive after the finish chunk.
+  const rawUsage = chunk.usage;
+  if (rawUsage && typeof rawUsage === "object") {
+    const promptTokens = Number(rawUsage.prompt_tokens ?? rawUsage.input_tokens ?? 0);
+    const completionTokens = Number(rawUsage.completion_tokens ?? rawUsage.output_tokens ?? 0);
+    // Shared alias readers cover the same nested + top-level cache keys
+    // (OpenAI details, DeepSeek hit/miss, Claude split counters, Gemini).
+    const cachedTokens = readCachedTokens(rawUsage);
+    const cacheWriteTokens = readCacheWriteTokens(rawUsage);
+    const reasoningTokens = Number(
+      rawUsage.completion_tokens_details?.reasoning_tokens ??
+      rawUsage.output_tokens_details?.reasoning_tokens ??
+      rawUsage.reasoning_tokens ?? 0,
+    );
+    const safePromptTokens = Number.isFinite(promptTokens) ? promptTokens : 0;
+    const safeCompletionTokens = Number.isFinite(completionTokens) ? completionTokens : 0;
+    const safeReasoningTokens = Number.isFinite(reasoningTokens) ? reasoningTokens : 0;
+    if ([promptTokens, completionTokens, cachedTokens, cacheWriteTokens, reasoningTokens].some((n) => Number.isFinite(n) && n > 0)) {
+      state.usage = buildUsage({
+        promptTokens: safePromptTokens,
+        completionTokens: safeCompletionTokens,
+        totalTokens: Number.isFinite(Number(rawUsage.total_tokens)) && Number(rawUsage.total_tokens) > 0
+          ? Number(rawUsage.total_tokens)
+          : safePromptTokens + safeCompletionTokens,
+        cachedTokens,
+        cacheCreationTokens: cacheWriteTokens,
+        reasoningTokens: safeReasoningTokens,
+      });
+    }
+  }
+
+  // OpenAI-compatible providers may send a usage-only terminal chunk after
+  // the finish chunk. Do not drop it: it is the only place where some
+  // providers expose the final cache counters.
+  if (!chunk.choices?.length) {
+    if (chunk.usage && state.pendingCompletion && !state.completedSent) {
+      const events = [];
+      const emit = (eventType, data) => {
+        data.sequence_number = ++state.seq;
+        events.push({ event: eventType, data });
+      };
+      sendCompleted(state, emit);
+      return events;
+    }
+    return [];
+  }
   
   const events = [];
   const nextSeq = () => ++state.seq;
@@ -112,7 +159,12 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
     for (const i in state.funcCallIds) closeToolCall(state, emit, i);
-    sendCompleted(state, emit);
+    state.finishReason = choice.finish_reason;
+    state.pendingCompletion = true;
+    // DeepSeek and several other providers attach usage to the finish chunk.
+    // Providers that emit a later usage-only chunk are completed in the branch
+    // above or during flushEvents().
+    if (chunk.usage && typeof chunk.usage === "object") sendCompleted(state, emit);
   }
 
   return events;
@@ -368,6 +420,10 @@ function closeToolCall(state, emit, idx) {
 function sendCompleted(state, emit) {
   if (!state.completedSent) {
     state.completedSent = true;
+    state.pendingCompletion = false;
+    const usage = state.usage && typeof state.usage === "object"
+      ? { usage: toResponsesUsage(state.usage) }
+      : {};
     emit("response.completed", {
       type: "response.completed",
       response: {
@@ -376,7 +432,8 @@ function sendCompleted(state, emit) {
         created_at: state.created,
         status: "completed",
         background: false,
-        error: null
+        error: null,
+        ...usage
       }
     });
   }
@@ -543,13 +600,31 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     // Extract usage from response.completed event
     const responseUsage = data.response?.usage;
     if (responseUsage && typeof responseUsage === "object") {
-      const inputTokens = responseUsage.input_tokens || responseUsage.prompt_tokens || 0;
-      const outputTokens = responseUsage.output_tokens || responseUsage.completion_tokens || 0;
+      const inputTokens = responseUsage.input_tokens ?? responseUsage.prompt_tokens ?? 0;
+      const outputTokens = responseUsage.output_tokens ?? responseUsage.completion_tokens ?? 0;
       // OpenAI Responses API: input_tokens already includes cached_tokens
       // Cache info is in input_tokens_details.cached_tokens
-      const cacheReadTokens = responseUsage.input_tokens_details?.cached_tokens || responseUsage.cache_read_input_tokens || 0;
+      const cacheReadTokens = responseUsage.input_tokens_details?.cached_tokens
+        ?? responseUsage.cache_read_input_tokens
+        ?? responseUsage.cached_tokens
+        ?? 0;
+      const cacheWriteTokens = responseUsage.input_tokens_details?.cache_write_tokens
+        ?? responseUsage.input_tokens_details?.cache_creation_tokens
+        ?? responseUsage.cache_creation_input_tokens
+        ?? responseUsage.cache_write_tokens
+        ?? 0;
+      const reasoningTokens = responseUsage.output_tokens_details?.reasoning_tokens
+        ?? responseUsage.reasoning_tokens
+        ?? 0;
       
-      state.usage = buildUsage({ promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens, cachedTokens: cacheReadTokens });
+      state.usage = buildUsage({
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        cachedTokens: cacheReadTokens,
+        cacheCreationTokens: cacheWriteTokens,
+        reasoningTokens,
+      });
     }
     
     if (!state.finishReasonSent) {

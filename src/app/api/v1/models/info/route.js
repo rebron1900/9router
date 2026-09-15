@@ -1,6 +1,7 @@
 import { PROVIDER_MODELS } from "open-sse/config/providerModels.js";
 import { AI_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers";
 import { getModelKind } from "@/shared/constants/models";
+import { buildModelsList } from "@/app/api/v1/models/route";
 
 const KIND_ENDPOINT = {
   llm: "/v1/chat/completions",
@@ -76,6 +77,24 @@ function lookup(fullId, requestedKind) {
   return null;
 }
 
+// Info derived from a discovery entry — the fallback for models that only
+// exist in dynamic catalogs (live resolvers, custom models, enabledModels
+// allowlists), which the static PROVIDER_MODELS lookup() cannot see.
+function buildDiscoveryInfo(entry, fallbackKind) {
+  const kind = entry.kind || fallbackKind || "llm";
+  const out = {
+    id: entry.id,
+    name: entry.id,
+    kind,
+    owned_by: entry.owned_by || null,
+    endpoint: entry.endpoint || KIND_ENDPOINT[kind] || null,
+  };
+  if (entry.capabilities) out.capabilities = entry.capabilities;
+  if (Number.isFinite(Number(entry.context_length))) out.contextWindow = Number(entry.context_length);
+  if (Number.isFinite(Number(entry.max_completion_tokens))) out.maxOutputTokens = Number(entry.max_completion_tokens);
+  return out;
+}
+
 export async function OPTIONS() {
   return new Response(null, {
     headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" },
@@ -93,12 +112,36 @@ export async function GET(request) {
       { status: 400, headers: { "Access-Control-Allow-Origin": "*" } },
     );
   }
-  const info = lookup(id, kind);
-  if (!info) {
+  const requestedKind = kind === "chat" ? "llm" : kind;
+
+  // Static metadata first (params/voices/search config that discovery does not
+  // carry). Knowing the model's kind lets the visibility check run for ONE
+  // kind instead of every kind, avoiding serial live resolvers per kind.
+  const staticInfo = lookup(id, requestedKind);
+  let discovered;
+  if (staticInfo) {
+    discovered = await buildModelsList([staticInfo.kind]);
+  } else if (requestedKind) {
+    discovered = await buildModelsList([requestedKind]);
+  } else {
+    // Kind unknown: the LLM-root view matches almost everything; only fall
+    // back to the full kind sweep for image/tts/... models. (The full sweep
+    // alone would miss standard LLM models — buildModelsList filters
+    // non-image standard models whenever "image" is part of the query.)
+    discovered = await buildModelsList(["llm"]);
+    if (!discovered.some((model) => model?.id === id)) {
+      discovered = await buildModelsList(["llm", "image", "tts", "stt", "embedding", "imageToText", "video", "music", "webSearch", "webFetch"]);
+    }
+  }
+  if (!discovered.some((model) => model?.id === id)) {
     return Response.json(
       { error: { message: `Model not found: ${id}`, type: "not_found" } },
       { status: 404, headers: { "Access-Control-Allow-Origin": "*" } },
     );
   }
+
+  // Visible per discovery: prefer the static metadata when available, else
+  // build from the discovery entry so dynamic models do not 404 here.
+  const info = staticInfo || buildDiscoveryInfo(discovered.find((model) => model?.id === id), requestedKind);
   return Response.json(info, { headers: { "Access-Control-Allow-Origin": "*" } });
 }

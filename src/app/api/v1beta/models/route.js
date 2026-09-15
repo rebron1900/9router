@@ -1,5 +1,4 @@
-import { PROVIDER_MODELS } from "@/shared/constants/models";
-import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { buildModelsList } from "@/app/api/v1/models/route";
 
 /**
  * Handle CORS preflight
@@ -16,52 +15,33 @@ export async function OPTIONS() {
 
 /**
  * GET /v1beta/models - Gemini compatible models list
- * Returns models in Gemini API format
+ *
+ * Reuses buildModelsList("llm") — the same discovery pipeline /v1/models uses
+ * (connections, enabledModels allowlists, connection prefixes, live resolvers,
+ * custom models, combos, standard routing and visibility policy) — and converts
+ * the OpenAI-format entries to Gemini's models.list shape. Listing the static
+ * catalog here instead made Gemini clients see models that routing would
+ * reject (and miss live/dynamic ones), with stale prefix and kind info.
  */
 export async function GET() {
   try {
+    const discovered = await buildModelsList(["llm"]);
     const models = [];
     const seen = new Set();
-    let disabled = {};
-    try {
-      disabled = await getDisabledModels();
-    } catch (error) {
-      console.log("Could not fetch disabled models:", error?.message || error);
-    }
-
-    function addModel({ name, displayName, description, methods = ["generateContent"] }) {
-      if (seen.has(name)) return;
-      seen.add(name);
+    for (const entry of discovered) {
+      if (!entry?.id || seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      const displayName = entry.owned_by && !entry.id.startsWith(`${entry.owned_by}/`)
+        ? `${entry.owned_by}/${entry.id}`
+        : entry.id;
       models.push({
-        name,
+        name: `models/${entry.id}`,
         displayName,
-        description,
-        supportedGenerationMethods: methods,
-        inputTokenLimit: 128000,
-        outputTokenLimit: 8192,
+        description: `${entry.owned_by || "router"} model: ${entry.id}`,
+        supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+        ...(Number.isFinite(Number(entry.context_length)) ? { inputTokenLimit: Number(entry.context_length) } : { inputTokenLimit: 128000 }),
+        ...(Number.isFinite(Number(entry.max_completion_tokens)) ? { outputTokenLimit: Number(entry.max_completion_tokens) } : { outputTokenLimit: 8192 }),
       });
-    }
-    
-    for (const [provider, providerModels] of Object.entries(PROVIDER_MODELS)) {
-      for (const model of providerModels) {
-        if (Array.isArray(disabled[provider]) && disabled[provider].includes(model.id)) {
-          continue;
-        }
-        addModel({
-          name: `models/${provider}/${model.id}`,
-          displayName: model.name || model.id,
-          description: `${provider} model: ${model.name || model.id}`,
-        });
-
-        if (provider === "gemini") {
-          addModel({
-            name: `models/${model.id}`,
-            displayName: model.name || model.id,
-            description: `Gemini model: ${model.name || model.id}`,
-            methods: ["generateContent", "streamGenerateContent"],
-          });
-        }
-      }
     }
 
     return Response.json({ models });

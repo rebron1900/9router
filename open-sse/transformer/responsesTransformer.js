@@ -6,6 +6,7 @@
 
 import fs from "fs";
 import path from "path";
+import { toResponsesUsage } from "../translator/concerns/usage.js";
 
 // Create log directory for responses (Node.js only)
 export function createResponsesLogger(model, logsDir = null) {
@@ -72,6 +73,8 @@ export function createResponsesApiTransformStream(logger = null) {
     funcCallIds: {},
     funcArgsDone: {},
     funcItemDone: {},
+    usage: null,
+    pendingCompletion: false,
     buffer: "",
     completedSent: false
   };
@@ -225,6 +228,7 @@ export function createResponsesApiTransformStream(logger = null) {
   const sendCompleted = (controller) => {
     if (!state.completedSent) {
       state.completedSent = true;
+      state.pendingCompletion = false;
       emit(controller, "response.completed", {
         type: "response.completed",
         response: {
@@ -233,7 +237,8 @@ export function createResponsesApiTransformStream(logger = null) {
           created_at: state.created,
           status: "completed",
           background: false,
-          error: null
+          error: null,
+          ...(state.usage ? { usage: toResponsesUsage(state.usage) } : {})
         }
       });
     }
@@ -264,7 +269,17 @@ export function createResponsesApiTransformStream(logger = null) {
           continue;
         }
 
-        if (!parsed.choices?.length) continue;
+        // OpenAI-compatible providers may send the authoritative usage in a
+        // terminal choices:[] chunk after the finish chunk. Capture it before
+        // the choices guard so cache counters reach response.completed.
+        if (parsed.usage && typeof parsed.usage === "object") {
+          state.usage = parsed.usage;
+        }
+
+        if (!parsed.choices?.length) {
+          if (parsed.usage && state.pendingCompletion && !state.completedSent) sendCompleted(controller);
+          continue;
+        }
         
         const choice = parsed.choices[0];
         const idx = choice.index || 0;
@@ -419,7 +434,11 @@ export function createResponsesApiTransformStream(logger = null) {
           for (const i in state.msgItemAdded) closeMessage(controller, i);
           closeReasoning(controller);
           for (const i in state.funcCallIds) closeToolCall(controller, i);
-          sendCompleted(controller);
+          state.pendingCompletion = true;
+          // Providers that place usage on the finish chunk can complete now;
+          // providers with a later usage-only chunk complete in that branch or
+          // during flush().
+          if (parsed.usage && typeof parsed.usage === "object") sendCompleted(controller);
         }
       }
     },

@@ -37,8 +37,11 @@ export function canonicalizeQoderUsage(usage) {
     usage.cache_read_input_tokens,
   );
   const cacheCreation = num(
+    details.cache_write_tokens ??
     details.cache_creation_tokens ??
-    usage.cache_creation_input_tokens,
+    usage.cache_creation_input_tokens ??
+    usage.cache_write_input_tokens ??
+    usage.cache_write_tokens,
   );
 
   const promptTokens = prompt || 0;

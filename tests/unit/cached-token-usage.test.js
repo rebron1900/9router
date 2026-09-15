@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { canonicalizeUsage, extractUsage, mergeUsage } from "../../open-sse/utils/usageTracking.js";
+import { addBufferToUsage, canonicalizeUsage, extractUsage, mergeUsage } from "../../open-sse/utils/usageTracking.js";
 import { calculateCostFromTokens } from "../../open-sse/providers/pricing.js";
-import { buildUsage, toOpenAIUsage } from "../../open-sse/translator/concerns/usage.js";
+import { buildUsage, toClaudeUsage, toOpenAIChatUsage, toOpenAIUsage, toResponsesUsage } from "../../open-sse/translator/concerns/usage.js";
 
 // Canonical convention (single source of truth for storage + cost):
 //   prompt_tokens             = total input INCLUDING cache read + cache creation
@@ -11,6 +11,25 @@ import { buildUsage, toOpenAIUsage } from "../../open-sse/translator/concerns/us
 // Discriminator: Claude reports cache separately (prompt EXCLUDES cache);
 // OpenAI/Gemini report prompt INCLUDING cached_tokens.
 describe("canonicalizeUsage", () => {
+  it("normalizes native Gemini estimates before persistence", () => {
+    const out = canonicalizeUsage({
+      promptTokenCount: 1000,
+      candidatesTokenCount: 40,
+      thoughtsTokenCount: 10,
+      totalTokenCount: 1050,
+      cachedContentTokenCount: 700,
+      estimated: true,
+    });
+    expect(out).toEqual({
+      prompt_tokens: 1000,
+      completion_tokens: 50,
+      total_tokens: 1050,
+      cached_tokens: 700,
+      cache_creation_input_tokens: 0,
+      reasoning_tokens: 10,
+    });
+  });
+
   it("folds Claude exclusive cache into an inclusive prompt count", () => {
     // Claude: input_tokens excludes cache; cache_read + cache_creation are separate
     const out = canonicalizeUsage({
@@ -132,6 +151,74 @@ describe("calculateCostFromTokens (canonical inclusive convention)", () => {
   });
 });
 
+describe("usage protocol adapters", () => {
+  it("does not add headroom to provider-reported usage", () => {
+    const out = addBufferToUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 50,
+      total_tokens: 1050,
+      prompt_tokens_details: { cached_tokens: 800 },
+    });
+    expect(out).toEqual({
+      prompt_tokens: 1000,
+      completion_tokens: 50,
+      total_tokens: 1050,
+      prompt_tokens_details: { cached_tokens: 800 },
+    });
+  });
+
+  it("adds headroom only to estimated usage", () => {
+    const out = addBufferToUsage({ prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050, estimated: true });
+    expect(out.prompt_tokens).toBe(3000);
+    expect(out.total_tokens).toBe(3050);
+  });
+
+  it("serializes canonical cache data to Responses usage", () => {
+    expect(toResponsesUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 80,
+      cached_tokens: 700,
+      cache_creation_input_tokens: 100,
+      reasoning_tokens: 60,
+    })).toEqual({
+      input_tokens: 1000,
+      input_tokens_details: { cached_tokens: 700, cache_write_tokens: 100 },
+      output_tokens: 80,
+      output_tokens_details: { reasoning_tokens: 60 },
+      total_tokens: 1080,
+    });
+  });
+
+  it("keeps provider-specific cache semantics across Claude and Gemini adapters", () => {
+    expect(toClaudeUsage({
+      input_tokens: 100,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 100,
+      output_tokens: 80,
+    })).toEqual({
+      input_tokens: 100,
+      output_tokens: 80,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 100,
+    });
+
+    const gemini = toOpenAIChatUsage({
+      promptTokenCount: 1000,
+      cachedContentTokenCount: 700,
+      candidatesTokenCount: 20,
+      thoughtsTokenCount: 60,
+      totalTokenCount: 1080,
+    }, "gemini");
+    expect(gemini).toMatchObject({
+      prompt_tokens: 1000,
+      completion_tokens: 80,
+      total_tokens: 1080,
+      prompt_tokens_details: { cached_tokens: 700 },
+      completion_tokens_details: { reasoning_tokens: 60 },
+    });
+  });
+});
+
 describe("Anthropic streaming usage (message_start carries cache, message_delta output-only)", () => {
   it("extractUsage reads input + cache from message_start", () => {
     const u = extractUsage({
@@ -173,6 +260,21 @@ describe("Anthropic streaming usage (message_start carries cache, message_delta 
     expect(merged.prompt_tokens).toBe(100);
     expect(merged.cache_read_input_tokens).toBe(200);
     expect(merged.completion_tokens).toBe(50);
+  });
+});
+
+describe("OpenAI-compatible cache aliases", () => {
+  it("recognizes split cache-read/write aliases in streaming usage", () => {
+    const u = extractUsage({
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 40,
+        cache_read_input_tokens: 700,
+        cache_write_input_tokens: 100,
+      },
+    });
+    expect(u.cached_tokens).toBe(700);
+    expect(u.cache_creation_input_tokens).toBe(100);
   });
 });
 

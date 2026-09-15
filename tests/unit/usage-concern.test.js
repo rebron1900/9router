@@ -62,6 +62,19 @@ describe("toOpenAIUsage", () => {
     expect(u.total_tokens).toBe(99);
   });
 
+  it("commandcode: preserves AI SDK cache reads and writes", () => {
+    const u = toOpenAIUsage({
+      inputTokens: 8798,
+      outputTokens: 2,
+      totalTokens: 8800,
+      cachedInputTokens: 7552,
+      inputTokenDetails: { noCacheTokens: 1246, cacheReadTokens: 7552, cacheWriteTokens: 12 },
+    }, "commandcode");
+    expect(u.prompt_tokens).toBe(8798);
+    expect(u.prompt_tokens_details.cached_tokens).toBe(7552);
+    expect(u.prompt_tokens_details.cache_creation_tokens).toBe(12);
+  });
+
   it("unknown kind / null raw -> null", () => {
     expect(toOpenAIUsage({}, "nope")).toBeNull();
     expect(toOpenAIUsage(null, "claude")).toBeNull();

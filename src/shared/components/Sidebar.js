@@ -19,11 +19,9 @@ const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "trave
 
 const navItems = [
   { href: "/dashboard/endpoint", label: "Endpoint & Key", icon: "api" },
-  { href: "/dashboard/providers", label: "Providers", icon: "dns" },
+  { href: "/dashboard/model-management", label: "Model Management", icon: "hub" },
   { href: "/dashboard/images", label: "Image Studio", icon: "brush" },
   // { href: "/dashboard/basic-chat", label: "Basic Chat", icon: "chat" }, // Hidden
-  { href: "/dashboard/combos", label: "Combo & Vision Adapter", icon: "layers" },
-  { href: "/dashboard/standard-models", label: "Standard Model Routing", icon: "hub" },
   { href: "/dashboard/usage", label: "Usage", icon: "bar_chart" },
   { href: "/dashboard/quota", label: "Quota Tracker", icon: "data_usage" },
   { href: "/dashboard/token-saver", label: "Token Saver", icon: "savings" },
@@ -73,6 +71,13 @@ export default function Sidebar({ onClose }) {
   const isActive = (href) => {
     if (href === "/dashboard/endpoint") {
       return pathname === "/dashboard" || pathname.startsWith("/dashboard/endpoint");
+    }
+    if (href === "/dashboard/model-management") {
+      return pathname.startsWith("/dashboard/model-management")
+        || pathname === "/dashboard/providers"
+        || pathname.startsWith("/dashboard/providers/")
+        || pathname.startsWith("/dashboard/combos")
+        || pathname.startsWith("/dashboard/standard-models");
     }
     return pathname.startsWith(href);
   };

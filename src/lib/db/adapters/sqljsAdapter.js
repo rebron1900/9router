@@ -105,8 +105,18 @@ export async function createSqlJsAdapter(filePath) {
     db.close();
   }
 
-  // Flush on shutdown
+  // Flush on shutdown. Recreating the adapter (HMR) must retire the previous
+  // instance's handlers — they close over a dead db and would otherwise
+  // accumulate on process. Keep the live one in a global registry.
+  const flushRegistry = (globalThis.__sqljsFlushHandlers ??= new Set());
+  for (const stale of flushRegistry) {
+    process.off("beforeExit", stale);
+    process.off("SIGINT", stale);
+    process.off("SIGTERM", stale);
+  }
+  flushRegistry.clear();
   const flush = () => { if (dirty) try { persist(); } catch {} };
+  flushRegistry.add(flush);
   process.on("beforeExit", flush);
   process.on("SIGINT", flush);
   process.on("SIGTERM", flush);

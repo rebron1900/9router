@@ -30,7 +30,15 @@ import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
   try { initDbHooks(getSettings, updateSettings); } catch { /* ignore */ }
 })();
 
-process.setMaxListeners(20);
+// Next.js development/webpack and the provider cleanup stack can legitimately
+// install more than twenty process lifecycle listeners (notably signal-exit
+// handlers used by atomic file writes). Keep a finite warning threshold while
+// leaving an explicitly higher/unlimited host setting untouched.
+const PROCESS_LISTENER_LIMIT = 50;
+if (typeof process.getMaxListeners === "function" && typeof process.setMaxListeners === "function"
+  && process.getMaxListeners() > 0 && process.getMaxListeners() < PROCESS_LISTENER_LIMIT) {
+  process.setMaxListeners(PROCESS_LISTENER_LIMIT);
+}
 
 // Defer heavy startup work so the first HTTP request (login → dashboard) isn't
 // starved by DB cleanup, cloudflared download, lsof/DNS probes and OAuth pings.

@@ -336,21 +336,35 @@ export async function getRequestDetailById(id) {
   return row ? parseJson(row.data, null) : null;
 }
 
-const _shutdownHandler = async () => {
-  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-  if (writeBuffer.length > 0) await flushToDatabase();
-};
+// HMR re-evaluates this module and creates a NEW handler identity each time;
+// process.off() with the new reference cannot remove the previous module's
+// listeners, so beforeExit/SIGINT/SIGTERM/exit handlers accumulated four per
+// reload (each stale one still flushing an orphaned buffer). Keep the live
+// handler in a global registry so every reload removes the previous one first.
+const shutdownRegistry = (globalThis.__requestDetailsShutdownHandlers ??= new Set());
+
+function makeShutdownHandler() {
+  return async () => {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (writeBuffer.length > 0) await flushToDatabase();
+  };
+}
 
 function ensureShutdownHandler() {
-  process.off("beforeExit", _shutdownHandler);
-  process.off("SIGINT", _shutdownHandler);
-  process.off("SIGTERM", _shutdownHandler);
-  process.off("exit", _shutdownHandler);
+  for (const stale of shutdownRegistry) {
+    process.off("beforeExit", stale);
+    process.off("SIGINT", stale);
+    process.off("SIGTERM", stale);
+    process.off("exit", stale);
+  }
+  shutdownRegistry.clear();
 
-  process.on("beforeExit", _shutdownHandler);
-  process.on("SIGINT", _shutdownHandler);
-  process.on("SIGTERM", _shutdownHandler);
-  process.on("exit", _shutdownHandler);
+  const handler = makeShutdownHandler();
+  shutdownRegistry.add(handler);
+  process.on("beforeExit", handler);
+  process.on("SIGINT", handler);
+  process.on("SIGTERM", handler);
+  process.on("exit", handler);
 }
 
 ensureShutdownHandler();

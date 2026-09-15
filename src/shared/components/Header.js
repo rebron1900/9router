@@ -59,6 +59,22 @@ const getPageInfo = (pathname) => {
       breadcrumbs: [],
     };
 
+  if (pathname.includes("/model-management"))
+    return {
+      title: "Model Management",
+      description: "Manage providers, combo models, and standard model routes",
+      icon: "hub",
+      breadcrumbs: [],
+    };
+
+  if (pathname.includes("/model-visibility"))
+    return {
+      title: "Model Visibility",
+      description: "Control which configured models appear in discovery lists",
+      icon: "tune",
+      breadcrumbs: [],
+    };
+
   // Provider detail page: /dashboard/providers/[id]
   const providerMatch = pathname.match(/\/providers\/([^/]+)$/);
   if (providerMatch) {

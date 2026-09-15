@@ -1,20 +1,49 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { GEMINI_ROLE, OPENAI_FINISH, GEMINI_FINISH } from "../schema/index.js";
+import { readCachedTokens } from "../concerns/usage.js";
+
+function buildUsageMetadata(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const outputTokens = usage.completion_tokens ?? usage.output_tokens ?? 0;
+  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens
+    ?? usage.output_tokens_details?.reasoning_tokens
+    ?? usage.reasoning_tokens
+    ?? 0;
+  const metadata = {
+    promptTokenCount: usage.prompt_tokens ?? usage.input_tokens ?? 0,
+    candidatesTokenCount: Math.max(0, outputTokens - reasoningTokens),
+    totalTokenCount: usage.total_tokens ?? ((usage.prompt_tokens ?? usage.input_tokens ?? 0) + outputTokens),
+  };
+  if (reasoningTokens > 0) metadata.thoughtsTokenCount = reasoningTokens;
+  const cachedTokens = readCachedTokens(usage);
+  if (cachedTokens > 0) metadata.cachedContentTokenCount = cachedTokens;
+  return metadata;
+}
 
 // Convert OpenAI SSE chunk to Antigravity SSE format
 // Real Antigravity format:
 //   data: {"response":{"candidates":[{"content":{"role":"model","parts":[...]}, "finishReason":"STOP"}], "usageMetadata":{...}, "modelVersion":"...", "responseId":"..."}}
 // Tool calls: OpenAI sends incremental args across chunks → accumulate and emit ONCE at finish
 export function openaiToAntigravityResponse(chunk, state) {
-  if (!chunk) return null;
+  if (!chunk) {
+    const pending = state?._pendingAntigravityResponse;
+    if (!pending) return null;
+    state._pendingAntigravityResponse = null;
+    return pending;
+  }
 
   const choice = chunk.choices?.[0];
   if (!choice) {
     if (chunk.usage) {
       state._usage = chunk.usage;
     }
-    return null;
+    const pending = state._pendingAntigravityResponse;
+    if (!pending) return null;
+    state._pendingAntigravityResponse = null;
+    const usageMetadata = buildUsageMetadata(state._usage);
+    if (usageMetadata) pending.response.usageMetadata = usageMetadata;
+    return pending;
   }
 
   const delta = choice.delta || {};
@@ -55,6 +84,7 @@ export function openaiToAntigravityResponse(chunk, state) {
 
   // On finish, emit accumulated tool calls as complete functionCall parts
   if (finishReason) {
+    state.finishReason = finishReason;
     const indices = Object.keys(state._toolCallAccum);
     for (const idx of indices) {
       const accum = state._toolCallAccum[idx];
@@ -102,21 +132,18 @@ export function openaiToAntigravityResponse(chunk, state) {
 
   // Usage metadata
   const usage = chunk.usage || state._usage;
-  if (usage) {
-    response.usageMetadata = {
-      promptTokenCount: usage.prompt_tokens || 0,
-      candidatesTokenCount: usage.completion_tokens || 0,
-      totalTokenCount: usage.total_tokens || 0
-    };
-    if (usage.completion_tokens_details?.reasoning_tokens) {
-      response.usageMetadata.thoughtsTokenCount = usage.completion_tokens_details.reasoning_tokens;
-    }
-    if (usage.prompt_tokens_details?.cached_tokens) {
-      response.usageMetadata.cachedContentTokenCount = usage.prompt_tokens_details.cached_tokens;
-    }
-  }
+  const usageMetadata = buildUsageMetadata(usage);
+  if (usageMetadata) response.usageMetadata = usageMetadata;
 
-  return { response };
+  const result = { response };
+  // Hold a usage-less terminal so a later choices-empty usage frame can be
+  // attached authoritatively. If it never arrives, stream.js flush injects an
+  // estimated usage into this same native response envelope.
+  if (finishReason && !usageMetadata) {
+    state._pendingAntigravityResponse = result;
+    return null;
+  }
+  return result;
 }
 
 // Register

@@ -3,6 +3,7 @@ import { needsTranslation } from "../../translator/index.js";
 import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
+import { toClaudeUsage, toOpenAIChatUsage, toResponsesUsage } from "../../translator/concerns/usage.js";
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
@@ -55,10 +56,7 @@ function openAICompletionToClaudeMessage(responseBody) {
     content,
     stop_reason: fromOpenAIFinish(choice.finish_reason, FORMATS.CLAUDE),
     stop_sequence: null,
-    usage: {
-      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
-      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
-    },
+    usage: toClaudeUsage(usage),
   };
 }
 
@@ -131,11 +129,7 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
     background: false,
     error: null,
     output,
-    usage: {
-      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
-      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
-      total_tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
-    },
+    usage: toResponsesUsage(usage),
   };
 }
 
@@ -203,14 +197,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     };
 
     if (usage) {
-      result.usage = {
-        prompt_tokens: (usage.promptTokenCount || 0) + (usage.thoughtsTokenCount || 0),
-        completion_tokens: usage.candidatesTokenCount || 0,
-        total_tokens: usage.totalTokenCount || 0
-      };
-      if (usage.thoughtsTokenCount > 0) {
-        result.usage.completion_tokens_details = { reasoning_tokens: usage.thoughtsTokenCount };
-      }
+      result.usage = toOpenAIChatUsage(usage, "gemini");
     }
     return result;
   }
@@ -262,11 +249,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     };
 
     if (responseBody.usage) {
-      result.usage = {
-        prompt_tokens: responseBody.usage.input_tokens || 0,
-        completion_tokens: responseBody.usage.output_tokens || 0,
-        total_tokens: (responseBody.usage.input_tokens || 0) + (responseBody.usage.output_tokens || 0)
-      };
+      result.usage = toOpenAIChatUsage(responseBody.usage, "claude");
     }
     return result;
   }
@@ -330,9 +313,19 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, requestId, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
-  const translatedResponse = needsTranslation(targetFormat, sourceFormat)
+  let translatedResponse = needsTranslation(targetFormat, sourceFormat)
     ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames)
     : responseBody;
+  // Every non-streaming Responses client must receive a Responses `output`
+  // envelope, regardless of whether the upstream was OpenAI-compatible,
+  // Claude, Gemini, Ollama, or another provider that first converts to Chat.
+  // The streaming bridge already pivots through OpenAI; apply the same final
+  // shape here so cache usage and tool calls are not stranded in `choices`.
+  if (sourceFormat === FORMATS.OPENAI_RESPONSES
+      && translatedResponse?.choices
+      && translatedResponse.object !== "response") {
+    translatedResponse = openAICompletionToResponses(translatedResponse, customToolNames);
+  }
   const isClaudeMessageResponse = sourceFormat === FORMATS.CLAUDE && translatedResponse?.type === "message";
   // Responses-format translation produces a `object:"response"` body with no
   // `choices`; skip the Chat-Completions-specific post-processing below for it.

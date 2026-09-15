@@ -434,9 +434,15 @@ export function calculateCostFromTokens(tokens, pricing) {
   }
 
   const outputTokens = tokens.completion_tokens || tokens.output_tokens || 0;
-  cost += outputTokens * (pricing.output / 1000000);
-
+  // Canonical convention (OpenAI + this repo's canonicalizeUsage):
+  // completion_tokens ALREADY includes reasoning tokens. Charge the
+  // non-reasoning remainder at the output rate and reasoning at its own rate;
+  // charging both double-bills every thinking token (Gemini thoughtsTokenCount
+  // and OpenAI completion_tokens_details.reasoning_tokens are subsets).
   const reasoningTokens = tokens.reasoning_tokens || 0;
+  const nonReasoningOutput = Math.max(0, outputTokens - reasoningTokens);
+  cost += nonReasoningOutput * (pricing.output / 1000000);
+
   if (reasoningTokens > 0) {
     cost += reasoningTokens * ((pricing.reasoning || pricing.output) / 1000000);
   }

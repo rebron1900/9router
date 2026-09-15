@@ -4,6 +4,8 @@
  * Used when client requests non-streaming but provider forces streaming (e.g., Codex)
  */
 
+import { readCachedTokens, readCacheWriteTokens } from "../translator/concerns/usage.js";
+
 /**
  * Process a single SSE message and update state accordingly.
  */
@@ -30,9 +32,36 @@ function processSSEMessage(msg, state) {
   } else if (eventType === "response.completed" || eventType === "response.done") {
     state.status = "completed";
     if (parsed.response?.usage) {
-      state.usage.input_tokens = parsed.response.usage.input_tokens || 0;
-      state.usage.output_tokens = parsed.response.usage.output_tokens || 0;
-      state.usage.total_tokens = parsed.response.usage.total_tokens || 0;
+      // Preserve cache and reasoning detail objects. They are part of the
+      // Responses usage contract and are otherwise lost when an SSE response
+      // is buffered into JSON (which makes Agent cache-rate accounting read 0).
+      // Cache aliases go through the shared readers so top-level
+      // cache_read_input_tokens / cache_write_input_tokens (Claude-style
+      // Responses providers) are counted too, not only the nested details.
+      const usage = parsed.response.usage;
+      const cachedTokens = readCachedTokens(usage);
+      const cacheWriteTokens = readCacheWriteTokens(usage);
+      const reasoningTokens = usage.output_tokens_details?.reasoning_tokens
+        ?? usage.reasoning_tokens;
+      state.usage = {
+        ...state.usage,
+        input_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
+        output_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
+        total_tokens: usage.total_tokens ?? ((usage.input_tokens ?? usage.prompt_tokens ?? 0) + (usage.output_tokens ?? usage.completion_tokens ?? 0)),
+        ...((usage.input_tokens_details || cachedTokens > 0 || cacheWriteTokens > 0) ? {
+          input_tokens_details: {
+            ...(usage.input_tokens_details || {}),
+            ...(cachedTokens > 0 ? { cached_tokens: cachedTokens } : {}),
+            ...(cacheWriteTokens > 0 ? { cache_write_tokens: cacheWriteTokens } : {}),
+          }
+        } : {}),
+        ...((usage.output_tokens_details || reasoningTokens !== undefined) ? {
+          output_tokens_details: {
+            ...(usage.output_tokens_details || {}),
+            ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
+          }
+        } : {}),
+      };
     }
   } else if (eventType === "response.failed") {
     state.status = "failed";

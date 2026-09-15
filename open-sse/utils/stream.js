@@ -106,6 +106,56 @@ export function createSSEStream(options = {}) {
     }
   };
 
+  // A terminal chunk leaving the translator must carry usage: estimated from
+  // the accumulated stream when the provider never sent any, buffered from the
+  // real usage otherwise. This runs on BOTH the transform loop and flush() —
+  // a deferred finish (usage trailer never arrives before EOF) used to leave
+  // the flush path emitting {input_tokens: 0, output_tokens: 0}, which made
+  // clients account a real response as free and corrupted cache rates.
+  const injectTerminalUsage = (items) => {
+    for (const item of items) {
+      if (item === null || item === undefined) continue;
+
+      // Translators use different terminal envelopes. Keep the usage
+      // injection at the wire boundary, but locate the nested usage field for
+      // Gemini/Antigravity ({response.usageMetadata}) and Responses
+      // ({event,data.response.usage}) as well as Chat/Claude ({usage}).
+      let terminalUsage = item.usage;
+      let setTerminalUsage = (value) => { item.usage = value; };
+      let isFinishChunk = item.type === "message_delta" || item.choices?.[0]?.finish_reason;
+      let isNestedTerminal = false;
+
+      const isResponsesTerminal = item.event === "response.completed"
+        || item.event === "response.done"
+        || item.data?.type === "response.completed"
+        || item.data?.type === "response.done";
+      if (isResponsesTerminal && item.data?.response && typeof item.data.response === "object") {
+        isFinishChunk = true;
+        isNestedTerminal = true;
+        terminalUsage = item.data.response.usage;
+        setTerminalUsage = (value) => { item.data.response.usage = value; };
+      }
+
+      const isGeminiTerminal = item.response?.candidates?.some((candidate) => candidate?.finishReason);
+      if (isGeminiTerminal && item.response && typeof item.response === "object") {
+        isFinishChunk = true;
+        isNestedTerminal = true;
+        terminalUsage = item.response.usageMetadata;
+        setTerminalUsage = (value) => { item.response.usageMetadata = value; };
+      }
+
+      if (!state?.finishReason || !isFinishChunk) continue;
+      if (!hasValidUsage(terminalUsage) && totalContentLength > 0) {
+        const estimated = estimateUsage(body, totalContentLength, sourceFormat);
+        setTerminalUsage(filterUsageForFormat(estimated, sourceFormat)); // Filter + already has buffer
+        state.usage = estimated;
+      } else if (state.usage && (!isNestedTerminal || !hasValidUsage(terminalUsage))) {
+        // Add buffer and filter usage for client (but keep original in state.usage for logging)
+        setTerminalUsage(filterUsageForFormat(addBufferToUsage(state.usage), sourceFormat));
+      }
+    }
+  };
+
   return new TransformStream({
     transform(chunk, controller) {
       if (!ttftAt) ttftAt = Date.now();
@@ -354,16 +404,7 @@ export function createSSEStream(options = {}) {
             }
 
             // Inject estimated usage if finish chunk has no valid usage
-            const isFinishChunk = item.type === "message_delta" || item.choices?.[0]?.finish_reason;
-            if (state.finishReason && isFinishChunk && !hasValidUsage(item.usage) && totalContentLength > 0) {
-              const estimated = estimateUsage(body, totalContentLength, sourceFormat);
-              item.usage = filterUsageForFormat(estimated, sourceFormat); // Filter + already has buffer
-              state.usage = estimated;
-            } else if (state.finishReason && isFinishChunk && state.usage) {
-              // Add buffer and filter usage for client (but keep original in state.usage for logging)
-              const buffered = addBufferToUsage(state.usage);
-              item.usage = filterUsageForFormat(buffered, sourceFormat);
-            }
+            injectTerminalUsage([item]);
 
             const output = formatSSE(item, sourceFormat);
             reqLogger?.appendConvertedChunk?.(output);
@@ -434,6 +475,7 @@ export function createSSEStream(options = {}) {
             }
 
             if (translated?.length > 0) {
+              injectTerminalUsage(translated);
               for (const item of translated) {
                 if (item === null || item === undefined) continue;
                 const output = formatSSE(item, sourceFormat);
@@ -445,6 +487,11 @@ export function createSSEStream(options = {}) {
         }
 
         const flushed = translateResponse(targetFormat, sourceFormat, null, state);
+
+        // Deferred terminals (e.g. Claude message_delta held for a usage
+        // trailer that never came) must go through the same usage injection
+        // as the transform loop, or they leave with zero counts.
+        if (Array.isArray(flushed) && flushed.length > 0) injectTerminalUsage(flushed);
 
         if (flushed?._openaiIntermediate) {
           for (const item of flushed._openaiIntermediate) {

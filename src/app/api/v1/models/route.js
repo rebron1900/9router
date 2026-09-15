@@ -2,8 +2,6 @@ import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/co
 import {
   AI_PROVIDERS,
   getProviderAlias,
-  isAnthropicCompatibleProvider,
-  isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels, getStandardModelBindings } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
@@ -20,6 +18,8 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { getCapabilitiesForModel, normalizeCapabilityOverrides } from "open-sse/providers/capabilities.js";
 import { resolveCapabilities } from "@/lib/modelCapabilities";
 import { planStandardModelCandidates } from "@/lib/standardModels/planner";
+import { isStandardModelHidden } from "@/lib/standardModels/visibility";
+import { configuredModelIds, isModelHidden, normalizeModelIds } from "@/lib/modelDiscovery";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -136,15 +136,6 @@ const LIVE_MODEL_RESOLVERS = {
   },
 };
 
-const parseOpenAIStyleModels = (data) => {
-  if (Array.isArray(data)) return data;
-  return data?.data || data?.models || data?.results || [];
-};
-
-// Header sent by fetchCompatibleModelIds to detect cross-instance /models fetches
-// and break recursive loops between 9router instances connected to each other.
-const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
-
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
 
@@ -223,63 +214,6 @@ function attachInputModalities(model, capabilities) {
   return model;
 }
 
-async function fetchCompatibleModelIds(connection) {
-  if (!connection?.apiKey) return [];
-
-  const baseUrl = typeof connection?.providerSpecificData?.baseUrl === "string"
-    ? connection.providerSpecificData.baseUrl.trim().replace(/\/$/, "")
-    : "";
-
-  if (!baseUrl) return [];
-
-  let url = `${baseUrl}/models`;
-  const headers = {
-    "Content-Type": "application/json",
-  };
-
-  if (isOpenAICompatibleProvider(connection.provider)) {
-    headers.Authorization = `Bearer ${connection.apiKey}`;
-  } else if (isAnthropicCompatibleProvider(connection.provider)) {
-    if (url.endsWith("/messages/models")) {
-      url = url.slice(0, -9);
-    } else if (url.endsWith("/messages")) {
-      url = `${url.slice(0, -9)}/models`;
-    }
-    headers["x-api-key"] = connection.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-    headers.Authorization = `Bearer ${connection.apiKey}`;
-  } else {
-    return [];
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { ...headers, [INTERNAL_MODELS_FETCH_HEADER]: "1" },
-      cache: "no-store",
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const rawModels = parseOpenAIStyleModels(data);
-
-    return Array.from(
-      new Set(
-        rawModels
-          .map((model) => model?.id || model?.name || model?.model)
-          .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "")
-      )
-    );
-  } catch {
-    return [];
-  }
-}
-
 // Provider matches kindFilter when its serviceKinds intersect the requested kinds.
 // LLM is the default kind for providers missing serviceKinds.
 function providerMatchesKinds(providerId, kindFilter) {
@@ -332,17 +266,15 @@ async function standardModelHasImageCapability(standardModel, standardCapabiliti
  * Build OpenAI-format models list filtered by service kinds.
  * @param {string[]} kindFilter - List of service kinds to include (e.g. ["llm"], ["webSearch","webFetch"]).
  */
-export async function buildModelsList(kindFilter, options = {}) {
-  // When this header is present, the /v1/models request came from another
-  // 9router instance's fetchCompatibleModelIds — skip dynamic fetch to break
-  // cross-instance recursive loops.
-  const skipDynamicFetch = options.skipDynamicFetch === true;
+export async function buildModelsList(kindFilter) {
   let connections = [];
+  let connectionsLoadFailed = false;
   try {
     connections = await getProviderConnections();
     connections = connections.filter(c => c.isActive !== false);
   } catch (e) {
-    console.log("Could not fetch providers, returning all models");
+    connectionsLoadFailed = true;
+    console.log("Could not fetch providers; provider discovery is unavailable");
   }
 
   let combos = [];
@@ -406,6 +338,7 @@ export async function buildModelsList(kindFilter, options = {}) {
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
     if (!comboMatchesKinds(combo, kindFilter)) continue;
+    if (isModelHidden(disabledByAlias, ["combo"], combo.name)) continue;
     const entry = {
       id: combo.name,
       object: "model",
@@ -417,17 +350,20 @@ export async function buildModelsList(kindFilter, options = {}) {
     models.push(entry);
   }
 
-  if (connections.length === 0) {
-    // DB unavailable -> return static models, filtered by per-model kind
+  if (connectionsLoadFailed) {
+    // A database error must not fail open into the entire built-in catalog.
+  } else if (connections.length === 0) {
+    // Only no-auth system providers are configured without a connection.
     const aliasToProviderId = Object.fromEntries(
       Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
     );
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
       const providerId = aliasToProviderId[alias] || alias;
+      if (!AI_PROVIDERS[providerId]?.noAuth) continue;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;
-        if (isDisabled(alias, model.id)) continue;
+        if (isDisabled(alias, providerId, model.id)) continue;
         models.push({
           id: `${alias}/${model.id}`,
           object: "model",
@@ -436,23 +372,6 @@ export async function buildModelsList(kindFilter, options = {}) {
       }
     }
 
-    for (const customModel of customModels) {
-      if (!customModel?.id || (customModel.type && customModel.type !== "llm")) continue;
-      // Custom models without active connection are LLM-only by current schema
-      if (!kindFilter.includes(LLM_KIND)) continue;
-      const providerAlias = customModel.providerAlias;
-      if (!providerAlias) continue;
-
-      const modelId = String(customModel.id).trim();
-      if (!modelId) continue;
-      if (isDisabled(providerAlias, modelId)) continue;
-
-      models.push({
-        id: `${providerAlias}/${modelId}`,
-        object: "model",
-        owned_by: providerAlias,
-      });
-    }
   } else {
     for (const [providerId, conn] of activeConnectionByProvider.entries()) {
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
@@ -465,10 +384,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       ).trim();
       const providerModels = PROVIDER_MODELS[staticAlias] || [];
       const enabledModels = conn?.providerSpecificData?.enabledModels;
-      const hasExplicitEnabledModels =
-        Array.isArray(enabledModels) && enabledModels.length > 0;
-      const isCompatibleProvider =
-        isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
+      const hasExplicitEnabledModels = Array.isArray(enabledModels);
 
       // Build kind lookup for static models so we can filter even when only IDs are exposed
       const staticModelKindById = new Map(
@@ -478,18 +394,8 @@ export async function buildModelsList(kindFilter, options = {}) {
       let liveCapabilitiesById = new Map();
 
       let rawModelIds = hasExplicitEnabledModels
-        ? Array.from(
-            new Set(
-              enabledModels.filter(
-                (modelId) => typeof modelId === "string" && modelId.trim() !== "",
-              ),
-            ),
-          )
+        ? normalizeModelIds(enabledModels)
         : providerModels.map((model) => model.id);
-
-      if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
-        rawModelIds = await fetchCompatibleModelIds(conn);
-      }
 
       // Config-driven live catalog override (e.g. Kiro returns dynamic
       // -thinking/-agentic variants per account). On failure, fall back to
@@ -577,7 +483,12 @@ export async function buildModelsList(kindFilter, options = {}) {
         })
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
-      const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
+      const mergedModelIds = configuredModelIds({
+        connection: conn,
+        staticModelIds: modelIds,
+        customModelIds,
+        aliasModelIds,
+      });
 
       for (const modelId of mergedModelIds) {
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
@@ -667,6 +578,7 @@ export async function buildModelsList(kindFilter, options = {}) {
 
   for (const standardModel of standardModels) {
     if (!standardModel?.publicName || standardModel.enabledProviderCount < 1) continue;
+    if (isStandardModelHidden(disabledByAlias, standardModel.publicName)) continue;
     // Resolve through the same aggregation the request runtime uses. The
     // bundled authoritative catalog fills any gap the local registration
     // leaves, but a local record only overrides the fields it actually
@@ -742,11 +654,9 @@ export async function OPTIONS() {
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
-export async function GET(request) {
+export async function GET() {
   try {
-    // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
-    const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+    const data = await buildModelsList([LLM_KIND]);
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
