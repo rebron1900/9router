@@ -13,12 +13,9 @@ import {
   Legend,
 } from "recharts";
 import Card from "@/shared/components/Card";
+import { formatTokens } from "@/shared/utils/formatTokens";
 
-const fmtTokens = (n) => {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n || 0);
-};
+const fmtTokens = (n) => formatTokens(n);
 
 const fmtCost = (n) => `$${(n || 0).toFixed(4)}`;
 

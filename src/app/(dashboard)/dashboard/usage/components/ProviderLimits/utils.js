@@ -614,6 +614,24 @@ export function parseQuotaData(provider, data) {
         }
         break;
 
+      case "commandcode":
+        // Command Code exposes credit balances and rolling rate-limit windows.
+        // Preserve remainingPercentage because credits are balances rather than
+        // simple used/total counters.
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
+              unlimited: quota.unlimited,
+            });
+          });
+        }
+        break;
+
       case "groq":
         // Requests/Tokens rate-limit windows from response headers — absolute
         // used/total (calculatePercentage derives the bar), like Codex/Kiro.

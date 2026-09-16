@@ -211,6 +211,10 @@ const PROVIDER_MODELS_CONFIG = {
   },
   openai: createOpenAIModelsConfig("https://api.openai.com/v1/models"),
   openrouter: createOpenAIModelsConfig("https://openrouter.ai/api/v1/models"),
+  // Command Code's Provider API exposes an OpenAI-compatible live catalog.
+  // Keep the chat transport separate: CommandCodeExecutor still handles the
+  // CLI-compatible streaming endpoint, while discovery uses the Provider API.
+  commandcode: createOpenAIModelsConfig("https://api.commandcode.ai/provider/v1/models"),
   anthropic: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",

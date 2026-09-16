@@ -65,11 +65,10 @@ function waitForCommandCodeRetry(signal, delayMs = COMMANDCODE_TRANSIENT_RETRY_D
 }
 
 /**
- * Keep a standard-route deadline alive for the entire returned Response body.
- * A Response is committed before its ReadableStream finishes, so disposing
- * the budget at the routing boundary would cancel an in-flight upstream body
- * immediately after its first chunk. The wrapper owns cleanup on EOF, cancel,
- * or stream error and preserves the deferred forced-JSON telemetry contract.
+ * Keep a standard-route budget attached until the returned Response body is
+ * settled. Streaming handlers commit the budget on their first irreversible
+ * output, which clears only the route deadline; this wrapper still disposes
+ * the budget on EOF, cancel, or stream error.
  */
 export function withStandardRouteBudgetResponse(response, budget) {
   if (!budget || !response?.body?.getReader) {
@@ -471,8 +470,8 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
     throw error;
   }
   // A forced JSON response may have committed its 200 heartbeat while the
-  // provider is still buffering. Keep the shared deadline alive until that
-  // deferred outcome settles; ordinary response bodies own cleanup until EOF.
+  // provider is still buffering. The handler commits the route budget at that
+  // point, while this deferred outcome still owns final cleanup.
   const deferredOutcome = routedResponse?.__9routerDeferredOutcome;
   if (deferredOutcome) {
     Promise.resolve(deferredOutcome).finally(() => routeBudget.dispose?.()).catch(() => {});

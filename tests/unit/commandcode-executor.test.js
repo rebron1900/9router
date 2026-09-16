@@ -75,6 +75,7 @@ describe("parseCommandCodeError", () => {
   it("identifies CommandCode gateway failures as safe one-shot retries", () => {
     expect(isTransientCommandCodeError(520, "Gateway request failed")).toBe(true);
     expect(isTransientCommandCodeError(503, "Invalid error response format: Gateway request failed")).toBe(true);
+    expect(isTransientCommandCodeError(500, 'Cannot connect to API: HTTP/2: "GOAWAY" frame received with code 0')).toBe(true);
     expect(isTransientCommandCodeError(401, "Gateway request failed")).toBe(false);
   });
 });

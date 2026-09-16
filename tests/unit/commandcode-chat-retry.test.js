@@ -157,6 +157,30 @@ describe("CommandCode transient chat retry", () => {
     expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
   });
 
+  it("retries the HTTP/2 GOAWAY envelope reported as status 500", async () => {
+    const { first } = useRoundRobinSimulation();
+    const goaway = 'Cannot connect to API: HTTP/2: "GOAWAY" frame received with code 0';
+    mocks.handleChatCore
+      .mockResolvedValueOnce(failure(500, goaway))
+      .mockResolvedValueOnce(success(first.connectionId));
+
+    const response = await handleSingleModelChat(
+      { model: MODEL_PATH, messages: [{ role: "user", content: "hello" }], stream: true },
+      MODEL_PATH,
+      null,
+      request(),
+      null,
+      routeContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.handleChatCore).toHaveBeenCalledTimes(2);
+    expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
+    expect(mocks.getProviderCredentials.mock.calls[1][3]).toMatchObject({
+      preferredConnectionId: first.connectionId,
+    });
+  });
+
   it("locks the retried account only after the second gateway failure", async () => {
     const { first } = useRoundRobinSimulation();
     mocks.handleChatCore.mockResolvedValue(failure());

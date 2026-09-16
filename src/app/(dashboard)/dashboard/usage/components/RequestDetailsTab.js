@@ -7,6 +7,7 @@ import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
+import { formatExactTokens, formatTokens } from "@/shared/utils/formatTokens";
 
 let providerNameCache = null;
 let providerNodesCache = null;
@@ -381,16 +382,16 @@ export default function RequestDetailsTab() {
                        </span>
                      </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getInputTokens(detail.tokens).toLocaleString()}
+                      <span title={formatExactTokens(getInputTokens(detail.tokens))}>{formatTokens(getInputTokens(detail.tokens))}</span>
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCachedTokens(detail.tokens) > 0 ? getCachedTokens(detail.tokens).toLocaleString() : "—"}
+                      {getCachedTokens(detail.tokens) > 0 ? <span title={formatExactTokens(getCachedTokens(detail.tokens))}>{formatTokens(getCachedTokens(detail.tokens))}</span> : "—"}
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCacheCreationTokens(detail.tokens) > 0 ? getCacheCreationTokens(detail.tokens).toLocaleString() : "—"}
+                      {getCacheCreationTokens(detail.tokens) > 0 ? <span title={formatExactTokens(getCacheCreationTokens(detail.tokens))}>{formatTokens(getCacheCreationTokens(detail.tokens))}</span> : "—"}
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {detail.tokens?.completion_tokens?.toLocaleString() || 0}
+                      <span title={formatExactTokens(detail.tokens?.completion_tokens || 0)}>{formatTokens(detail.tokens?.completion_tokens || 0)}</span>
                     </td>
                     <td className="p-4 text-sm text-text-muted">
                       <div className="flex flex-col gap-0.5">
@@ -470,14 +471,14 @@ export default function RequestDetailsTab() {
               <div>
                 <span className="text-text-muted">Input Tokens:</span>{" "}
                 <span className="text-text-main font-mono">
-                  {getInputTokens(selectedDetail.tokens).toLocaleString()}
+                  <span title={formatExactTokens(getInputTokens(selectedDetail.tokens))}>{formatTokens(getInputTokens(selectedDetail.tokens))}</span>
                 </span>
               </div>
               {getCachedTokens(selectedDetail.tokens) > 0 && (
                 <div>
                   <span className="text-text-muted">Cached Tokens:</span>{" "}
                   <span className="text-text-main font-mono">
-                    {getCachedTokens(selectedDetail.tokens).toLocaleString()}
+                    <span title={formatExactTokens(getCachedTokens(selectedDetail.tokens))}>{formatTokens(getCachedTokens(selectedDetail.tokens))}</span>
                   </span>
                 </div>
               )}
@@ -485,14 +486,14 @@ export default function RequestDetailsTab() {
                 <div>
                   <span className="text-text-muted">Cache Creation:</span>{" "}
                   <span className="text-text-main font-mono">
-                    {getCacheCreationTokens(selectedDetail.tokens).toLocaleString()}
+                    <span title={formatExactTokens(getCacheCreationTokens(selectedDetail.tokens))}>{formatTokens(getCacheCreationTokens(selectedDetail.tokens))}</span>
                   </span>
                 </div>
               )}
               <div>
                 <span className="text-text-muted">Output Tokens:</span>{" "}
                 <span className="text-text-main font-mono">
-                  {selectedDetail.tokens?.completion_tokens?.toLocaleString() || 0}
+                  <span title={formatExactTokens(selectedDetail.tokens?.completion_tokens || 0)}>{formatTokens(selectedDetail.tokens?.completion_tokens || 0)}</span>
                 </span>
               </div>
             </div>

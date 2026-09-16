@@ -562,7 +562,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
-    const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, trackDone, appendLog });
+    const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, trackDone, appendLog, onRouteCommit: routeContext?.standardRoute ? () => routeContext.attemptBudget?.commit?.() : null });
     await captureResponseId(result, routeContext?.onResponseId);
     if (result) {
       if (result.deferred && result.deferredOutcome) {
@@ -598,7 +598,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Streaming response
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
-  const result = await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials, preflightStream: routeContext?.standardRoute === true, onResponseId: routeContext?.onResponseId });
+  const result = await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials, preflightStream: routeContext?.standardRoute === true, onResponseId: routeContext?.onResponseId, onRouteCommit: routeContext?.standardRoute ? () => routeContext.attemptBudget?.commit?.() : null });
   saveHandlerFailure(result);
   return result;
 }

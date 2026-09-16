@@ -147,6 +147,7 @@ export function createStandardRouteBudget({
   let attempts = 0;
   let lastAttempt = null;
   let timedOutByTimer = false;
+  let committed = false;
   let timer = null;
   const budgetController = new AbortController();
 
@@ -159,6 +160,7 @@ export function createStandardRouteBudget({
   };
   const cleanupParent = () => signal?.removeEventListener?.("abort", onParentAbort);
   const abortForBudget = () => {
+    if (committed) return;
     timedOutByTimer = true;
     if (!budgetController.signal.aborted) budgetController.abort(budgetError());
   };
@@ -177,7 +179,7 @@ export function createStandardRouteBudget({
   const state = () => {
     const aborted = !!signal?.aborted || budgetController.signal.aborted;
     const elapsedMs = Math.max(0, now() - startedAt);
-    const timedOut = timedOutByTimer || elapsedMs >= duration || budgetController.signal.reason?.code === STANDARD_ROUTE_BUDGET_ERROR_CODE;
+    const timedOut = !committed && (timedOutByTimer || elapsedMs >= duration || budgetController.signal.reason?.code === STANDARD_ROUTE_BUDGET_ERROR_CODE);
     return { aborted, timedOut, elapsedMs };
   };
 
@@ -202,8 +204,19 @@ export function createStandardRouteBudget({
         timeoutMs: duration,
         aborted: current.aborted,
         timedOut: current.timedOut,
+        committed,
         lastAttempt,
       };
+    },
+    /**
+     * Mark the response as committed. The route deadline no longer applies
+     * after the first irreversible output, but the parent request cancellation
+     * listener remains attached until dispose() so client disconnects still
+     * abort the active upstream stream.
+     */
+    commit() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      committed = true;
     },
     get exhausted() {
       const current = state();

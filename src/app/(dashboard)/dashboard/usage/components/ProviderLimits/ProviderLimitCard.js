@@ -46,6 +46,7 @@ export default function ProviderLimitCard({
       kiro: "#FF9900",
       qoder: "#EC4899",
       claude: "#D97757",
+      commandcode: "#111827",
     };
     return colors[provider?.toLowerCase()] || "#6B7280";
   };

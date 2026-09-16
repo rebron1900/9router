@@ -146,7 +146,7 @@ async function primeProviderResponse(providerResponse) {
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, requestId, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, attemptBudget = null, preflightStream = false, onResponseId = null }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, requestId, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, attemptBudget = null, preflightStream = false, onResponseId = null, onRouteCommit = null }) {
   if (onRequestSuccess && !preflightStream) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -231,7 +231,15 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const responseId = extractStandardResponseIdFromChunk(chunk);
     if (responseId) onResponseId?.(responseId);
   };
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, onResponseChunk, onResponseChunk);
+  let routeCommitted = false;
+  const onOutputChunk = (chunk) => {
+    if (!routeCommitted) {
+      routeCommitted = true;
+      onRouteCommit?.();
+    }
+    onResponseChunk(chunk);
+  };
+  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, onResponseChunk, onOutputChunk);
 
   saveRequestDetail(buildRequestDetail({
     requestId, provider, model, connectionId,

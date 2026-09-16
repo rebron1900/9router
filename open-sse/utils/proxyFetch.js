@@ -223,7 +223,12 @@ async function getDispatcher(proxyUrl) {
   if (!proxyDispatchers.has(normalized)) {
     // Evict oldest entry if max size reached
     if (proxyDispatchers.size >= MEMORY_CONFIG.proxyDispatchersMaxSize) {
-      proxyDispatchers.delete(proxyDispatchers.keys().next().value);
+      const oldestKey = proxyDispatchers.keys().next().value;
+      const oldest = proxyDispatchers.get(oldestKey);
+      proxyDispatchers.delete(oldestKey);
+      // ProxyAgent owns sockets and timers; removing it from the cache alone
+      // leaves those resources alive until their idle timeout.
+      try { oldest?.close?.(); } catch { /* best effort */ }
     }
     const { ProxyAgent } = await import("undici");
     proxyDispatchers.set(normalized, new ProxyAgent({ uri: normalized }));
@@ -244,8 +249,34 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
+    let req = null;
+    let settled = false;
+
+    const cleanupSignal = () => {
+      options.signal?.removeEventListener?.("abort", onAbort);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanupSignal();
+      try { req?.destroy?.(); } catch { /* best effort */ }
+      try { socket.destroy(); } catch { /* best effort */ }
+      reject(error);
+    };
+    const onAbort = () => {
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      fail(error);
+    };
+
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener?.("abort", onAbort, { once: true });
 
     socket.connect(HTTPS_PORT, realIP, () => {
+      if (settled) return;
       const reqOptions = {
         socket,
         // SNI + cert hostname are validated against the hostname the caller
@@ -263,7 +294,13 @@ async function createBypassRequest(parsedUrl, realIP, options) {
         },
       };
 
-      const req = https.request(reqOptions, (res) => {
+      req = https.request(reqOptions, (res) => {
+        if (settled) {
+          res.destroy();
+          return;
+        }
+        settled = true;
+        cleanupSignal();
         const response = {
           ok: res.statusCode >= HTTP_SUCCESS_MIN && res.statusCode < HTTP_SUCCESS_MAX,
           status: res.statusCode,
@@ -280,14 +317,14 @@ async function createBypassRequest(parsedUrl, realIP, options) {
         resolve(response);
       });
 
-      req.on("error", reject);
+      req.on("error", fail);
       if (options.body) {
         req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
       }
       req.end();
     });
 
-    socket.on("error", reject);
+    socket.on("error", fail);
   });
 }
 

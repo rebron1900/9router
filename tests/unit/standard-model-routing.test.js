@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { handleComboChat } from "../../open-sse/services/combo.js";
 import { handleStreamingResponse } from "../../open-sse/handlers/chatCore/streamingHandler.js";
 import { createStreamController } from "../../open-sse/utils/streamHandler.js";
+import { FORMATS } from "../../open-sse/translator/formats.js";
 import { planStandardModelCandidates } from "../../src/lib/standardModels/planner.js";
 import {
   buildStandardRouteErrorResponse,
@@ -169,6 +170,51 @@ describe("standard model route runtime", () => {
     expect(result.status).toBe(502);
     expect(handleError).toHaveBeenCalledOnce();
     expect(onRequestSuccess).not.toHaveBeenCalled();
+  });
+
+  it("commits the route budget on the first streamed output", async () => {
+    vi.useFakeTimers();
+    const budget = createStandardRouteBudget({ maxAttempts: 2, timeoutMs: 100 });
+    const streamController = createStreamController({
+      externalSignal: budget.signal,
+      provider: "provider-a",
+      model: "model-a",
+      log: {},
+    });
+    const onRouteCommit = vi.fn(() => budget.commit());
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: {"id":"chatcmpl_1","choices":[{"delta":{"content":"hello"}}]}\n\n`));
+        controller.close();
+      },
+    });
+
+    try {
+      const result = await handleStreamingResponse({
+        providerResponse: new Response(upstreamBody, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        provider: "provider-a",
+        model: "model-a",
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        body: { stream: true },
+        stream: true,
+        requestStartTime: Date.now(),
+        streamController,
+        attemptBudget: budget,
+        preflightStream: true,
+        onRouteCommit,
+      });
+      const reader = result.response.body.getReader();
+      await reader.read();
+      expect(onRouteCommit).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(101);
+      expect(budget.signal.aborted).toBe(false);
+      await reader.cancel();
+    } finally {
+      budget.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it("falls back on a non-stream provider failure and returns the successful response", async () => {

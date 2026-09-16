@@ -8,6 +8,7 @@ export async function GET(request) {
   const encoder = new TextEncoder();
   const emitter = getConsoleEmitter();
   const state = { closed: false, send: null, sendLines: null, sendClear: null, keepalive: null };
+  const onAbort = () => cleanup();
 
   // Idempotent: safe to call from request.signal abort, cancel(), or enqueue failure.
   const cleanup = () => {
@@ -17,11 +18,13 @@ export async function GET(request) {
     if (state.sendLines) emitter.off("lines", state.sendLines);
     if (state.sendClear) emitter.off("clear", state.sendClear);
     if (state.keepalive) clearInterval(state.keepalive);
+    request.signal.removeEventListener("abort", onAbort);
   };
 
   // request.signal fires reliably on client disconnect; ReadableStream.cancel()
   // is not always invoked in Next.js, which caused listeners to accumulate.
-  request.signal.addEventListener("abort", cleanup, { once: true });
+  request.signal.addEventListener("abort", onAbort, { once: true });
+  if (request.signal.aborted) cleanup();
 
   const stream = new ReadableStream({
     start(controller) {

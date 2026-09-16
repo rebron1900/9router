@@ -391,6 +391,7 @@ const FORCED_JSON_HEARTBEAT_GRACE_MS = 5_000;
 const FORCED_JSON_HEARTBEAT_MS = 5_000;
 
 export async function handleForcedSSEToJson(context) {
+  const { onRouteCommit } = context;
   const buffered = handleForcedSSEToJsonBuffered(context).then(
     (result) => ({ type: "buffered", result }),
     (error) => ({ type: "error", error }),
@@ -431,6 +432,10 @@ export async function handleForcedSSEToJson(context) {
   let heartbeatTimer;
   const stream = new ReadableStream({
     async start(controller) {
+      // The heartbeat commits a 200 response. From this point on there is no
+      // safe provider fallback, so let the stream stall watchdog—not the
+      // standard route deadline—govern the remaining buffered work.
+      onRouteCommit?.();
       // The client has already waited out the grace period, so flush one byte
       // right away: every extra silent second moves it closer to its own
       // request deadline. JSON permits this leading whitespace.

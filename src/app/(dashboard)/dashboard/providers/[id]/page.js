@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
@@ -14,7 +14,9 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+import { mergeProviderModelCatalog } from "@/shared/utils/providerModelCatalog";
 import ModelRow from "./ModelRow";
+import ModelCatalogToolbar from "./ModelCatalogToolbar";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
 import ConnectionRow from "./ConnectionRow";
@@ -71,6 +73,12 @@ export default function ProviderDetailPage() {
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [liveModels, setLiveModels] = useState([]);
+  const [liveModelsLoading, setLiveModelsLoading] = useState(false);
+  const [liveModelsWarning, setLiveModelsWarning] = useState("");
+  const [liveModelsLoaded, setLiveModelsLoaded] = useState(false);
+  const liveModelsRequestRef = useRef(0);
+  const [modelQuery, setModelQuery] = useState("");
+  const [modelFilter, setModelFilter] = useState("all");
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
@@ -152,10 +160,8 @@ export default function ProviderDetailPage() {
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
-  const staticModels = getModelsByProviderId(providerId);
-  const models = providerId === "cursor" && liveModels.length > 0
-    ? liveModels
-    : staticModels;
+  const staticModels = useMemo(() => getModelsByProviderId(providerId), [providerId]);
+  const models = liveModels.length > 0 ? liveModels : staticModels;
   const providerAlias = getProviderAlias(providerId);
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
@@ -467,33 +473,79 @@ export default function ProviderDetailPage() {
     fetchDisabledModels();
   }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
 
-  // Cursor's model availability is account-specific and changes frequently.
-  // Load the active account's live catalog for the dashboard; the static
-  // registry remains the fallback while the request is pending or unavailable.
-  useEffect(() => {
-    if (providerId !== "cursor") {
+  // Load the active connection's live model catalog. The static registry is
+  // still used when discovery is unavailable, while live-only models are
+  // surfaced immediately when a provider publishes them through /models.
+  const refreshLiveModels = useCallback(async () => {
+    const requestId = ++liveModelsRequestRef.current;
+    const isCurrentRequest = () => requestId === liveModelsRequestRef.current;
+    // A provider's catalog is shared by its connections in normal use. Pick
+    // one active connection so opening a provider page does not trigger a
+    // burst of identical /models requests (some OAuth providers have many
+    // accounts and refresh tokens as a side effect of discovery).
+    const activeConnection = connections.find((item) => item.provider === providerId && item.isActive !== false && item.id);
+    const activeConnections = activeConnection ? [activeConnection] : [];
+    if (activeConnections.length === 0) {
+      if (!isCurrentRequest()) return;
       setLiveModels([]);
+      setLiveModelsLoading(false);
+      setLiveModelsWarning("");
+      setLiveModelsLoaded(false);
       return;
     }
 
-    const connection = connections.find((item) => item.isActive !== false);
-    if (!connection?.id) {
-      setLiveModels([]);
-      return;
-    }
+    setLiveModelsLoading(true);
+    setLiveModelsWarning("");
+    setLiveModelsLoaded(false);
+    try {
+      const results = await Promise.allSettled(activeConnections.map(async (connection) => {
+        const response = await fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        return { ok: response.ok, data };
+      }));
 
-    let cancelled = false;
-    fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
-      .then(async (res) => ({ ok: res.ok, data: await res.json() }))
-      .then(({ ok, data }) => {
-        if (!cancelled && ok && Array.isArray(data.models) && data.models.length > 0) {
-          setLiveModels(data.models);
+      const liveCatalogs = [];
+      const warnings = [];
+      for (const result of results) {
+        if (result.status !== "fulfilled") {
+          warnings.push(translate("Unable to reach the provider model catalog."));
+          continue;
         }
-      })
-      .catch(() => {});
+        const { ok, data } = result.value;
+        if (data?.warning) warnings.push(translate(data.warning));
+        if (ok && Array.isArray(data?.models) && data.models.length > 0 && !data.warning) {
+          liveCatalogs.push(...data.models);
+        }
+      }
 
-    return () => { cancelled = true; };
-  }, [providerId, connections]);
+      if (!isCurrentRequest()) return;
+      if (liveCatalogs.length > 0) {
+        setLiveModels(mergeProviderModelCatalog({
+          staticModels,
+          liveModels: liveCatalogs,
+          providerId,
+          providerAlias,
+        }));
+        setLiveModelsLoaded(true);
+      } else {
+        setLiveModels([]);
+      }
+      setLiveModelsWarning([...new Set(warnings)].join(" "));
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      setLiveModels([]);
+      setLiveModelsWarning(translate(error.message || "Unable to load the provider model catalog."));
+    } finally {
+      if (isCurrentRequest()) setLiveModelsLoading(false);
+    }
+  }, [connections, providerAlias, providerId, staticModels]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      refreshLiveModels().catch(() => {});
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [refreshLiveModels]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -1134,12 +1186,16 @@ export default function ProviderDetailPage() {
           providerDisplayAlias={providerDisplayAlias}
           modelAliases={modelAliases}
           customModels={customModels}
+          liveModels={liveModels}
+          disabledModelIds={disabledModelIds}
           copied={copied}
           onCopy={copy}
           onSetAlias={handleSetAlias}
           onDeleteAlias={handleDeleteAlias}
           onAddCustomModel={(modelId) => handleAddCustomModel(modelId, "llm", providerStorageAlias)}
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
+          onDisableModel={handleDisableModel}
+          onEnableModel={handleEnableModel}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
         />
@@ -1161,11 +1217,44 @@ export default function ProviderDetailPage() {
       builtInModels: models,
       type: "llm",
     });
+    const activeCustomModelRows = customModelRows.filter((model) => !disabledSet.has(model.id));
+    const disabledCustomModelRows = customModelRows.filter((model) => disabledSet.has(model.id));
+    const normalizedQuery = modelQuery.trim().toLowerCase();
+    const matchesQuery = (model) => !normalizedQuery
+      || [model.id, model.name, model.alias].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedQuery));
+    const matchesFilter = (model, kind) => modelFilter === "all"
+      || (modelFilter === "custom" && kind === "custom")
+      || (modelFilter === "active" && kind === "active")
+      || (modelFilter === "live" && model.isLive)
+      || (modelFilter === "hidden" && kind === "hidden");
+    const filteredCustomModelRows = activeCustomModelRows.filter((model) => matchesQuery(model) && matchesFilter(model, "custom"));
+    const filteredDisplayModels = displayModels.filter((model) => matchesQuery(model) && matchesFilter(model, "active"));
+    const hiddenModelRows = [
+      ...disabledDisplayModels,
+      ...disabledCustomModelRows.map((model) => ({ ...model, isCustom: true })),
+    ];
+    const filteredDisabledModels = hiddenModelRows.filter((model) => matchesQuery(model) && matchesFilter(model, "hidden"));
+    const catalogCounts = {
+      all: customModelRows.length + displayModels.length + disabledDisplayModels.length,
+      active: activeCustomModelRows.length + displayModels.length,
+      custom: customModelRows.length,
+      live: [...customModelRows, ...displayModels, ...disabledDisplayModels].filter((model) => model.isLive).length,
+      hidden: hiddenModelRows.length,
+      visible: filteredCustomModelRows.length + filteredDisplayModels.length + filteredDisabledModels.length,
+    };
 
     return (
-      <div className="flex flex-wrap gap-3">
+      <div>
+        <ModelCatalogToolbar
+          query={modelQuery}
+          onQueryChange={setModelQuery}
+          filter={modelFilter}
+          onFilterChange={setModelFilter}
+          counts={catalogCounts}
+        />
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-3">
         {/* Custom models first */}
-        {customModelRows.map((model) => (
+        {filteredCustomModelRows.map((model) => (
           <ModelRow
             key={`${model.source}-${model.fullModel}`}
             model={{ id: model.id, name: model.name }}
@@ -1186,12 +1275,15 @@ export default function ProviderDetailPage() {
             isTesting={testingModelIds.has(model.id)}
             isCustom
             isFree={false}
+            isLive={model.isLive}
+            sourceLabel={model.source === "custom" ? "Custom" : "Alias"}
+            onDisable={() => handleDisableModel(model.id)}
             caps={getCaps(`${providerId}/${model.id}`)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
           />
         ))}
 
-        {displayModels.map((model) => {
+        {filteredDisplayModels.map((model) => {
           const fullModel = `${providerStorageAlias}/${model.id}`;
           const oldFormatModel = `${providerId}/${model.id}`;
           const existingAlias = Object.entries(modelAliases).find(
@@ -1211,6 +1303,8 @@ export default function ProviderDetailPage() {
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
+              isLive={model.isLive}
+              sourceLabel={model.isLive ? undefined : "Built-in"}
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
@@ -1218,14 +1312,22 @@ export default function ProviderDetailPage() {
           );
         })}
 
-        {/* Add model button — inline, same style as model chips */}
-        <button
-          onClick={() => setShowAddCustomModel(true)}
-          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/40 px-3 py-2 text-xs text-primary transition-colors hover:border-primary hover:bg-primary/5 sm:w-auto"
-        >
-          <span className="material-symbols-outlined text-sm">add</span>
-          Add Model
-        </button>
+        {filteredDisabledModels.map((model) => (
+          <ModelRow
+            key={`hidden-${model.source || "built-in"}-${model.id}`}
+            model={model}
+            fullModel={`${providerDisplayAlias}/${model.id}`}
+            copied={copied}
+            onCopy={copy}
+            testStatus={modelTestResults[model.id]}
+            isDisabled
+            sourceLabel={model.isCustom ? (model.source === "custom" ? "Custom" : "Alias") : "Hidden"}
+            isCustom={model.isCustom}
+            onRestore={() => handleEnableModel(model.id)}
+            caps={getCaps(`${providerId}/${model.id}`)}
+            thinkingSuffix={resolveThinkingSuffix(model.id)}
+          />
+        ))}
 
         {/* Import Qoder models button — only show for qoder provider */}
         {providerId === "qoder" && connections.some((conn) => conn.isActive !== false) && (
@@ -1267,8 +1369,8 @@ export default function ProviderDetailPage() {
           );
           if (notAdded.length === 0) return null;
           return (
-            <div className="w-full mt-2">
-              <p className="text-xs text-text-muted mb-2">Suggested free models (≥200k context):</p>
+            <div className="col-span-full mt-2 w-full border-t border-border/60 pt-3">
+              <p className="text-xs text-text-muted mb-2">{translate("Suggested free models (≥200k context):")}</p>
               <div className="flex flex-wrap gap-2">
                 {notAdded.map((m) => (
                   <button
@@ -1288,24 +1390,9 @@ export default function ProviderDetailPage() {
           );
         })()}
 
-        {/* Disabled models — restorable */}
-        {disabledDisplayModels.length > 0 && (
-          <div className="w-full mt-2">
-            <p className="text-xs text-text-muted mb-2">Disabled models ({disabledDisplayModels.length}):</p>
-            <div className="flex flex-wrap gap-2">
-              {disabledDisplayModels.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => handleEnableModel(m.id)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dashed border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                  title="Restore model"
-                >
-                  <span className="material-symbols-outlined text-[13px]">add</span>
-                  {m.id}
-                </button>
-              ))}
-            </div>
-          </div>
+        </div>
+        {catalogCounts.visible === 0 && (modelFilter !== "all" || normalizedQuery) && (
+          <p className="py-8 text-center text-sm text-text-muted">{translate("No models match this view.")}</p>
         )}
       </div>
     );
@@ -1727,8 +1814,14 @@ export default function ProviderDetailPage() {
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold">
-              {"Available Models"}
+              {translate("Available Models")}
             </h2>
+            {liveModelsLoaded && (
+              <span className="rounded-full border border-blue-500/25 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                {translate("Live catalog")}
+              </span>
+            )}
+            {liveModelsLoading && <span className="text-xs text-text-muted">{translate("Refreshing...")}</span>}
             {providerThinkingLevels && (
               <select
                 value={thinkingMode}
@@ -1742,8 +1835,43 @@ export default function ProviderDetailPage() {
               </select>
             )}
           </div>
-          {!isCompatible && (() => {
+          <div className="flex flex-wrap items-center gap-2">
+            {!isCompatible && (
+              <Button
+                size="sm"
+                icon="add"
+                onClick={() => setShowAddCustomModel(true)}
+                aria-label={translate("Add model")}
+                title={translate("Add model")}
+                className="shrink-0"
+              >
+                <span className="hidden lg:inline">{translate("Add Model")}</span>
+                <span className="sr-only lg:hidden">{translate("Add Model")}</span>
+              </Button>
+            )}
+            {connections.length > 0 && (
+              <Button
+                size="sm"
+                variant="secondary"
+                icon="refresh"
+                onClick={refreshLiveModels}
+                disabled={liveModelsLoading}
+                title={translate("Refresh live model catalog")}
+                aria-label={translate("Refresh live model catalog")}
+              >
+                <span className="hidden xl:inline">{translate("Refresh Models")}</span>
+                <span className="sr-only xl:hidden">{translate("Refresh Models")}</span>
+              </Button>
+            )}
+            {!isCompatible && (() => {
             const allIds = [
+              ...getProviderCustomModelRows({
+                customModels,
+                modelAliases,
+                providerAlias: providerStorageAlias,
+                builtInModels: models,
+                type: "llm",
+              }),
               ...models,
               ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
             ].filter((m) => { const k = getModelKind(m); return !k || k === "llm"; }).map((m) => m.id);
@@ -1752,20 +1880,30 @@ export default function ProviderDetailPage() {
               <div className="flex gap-2">
                 {disabledModelIds.length > 0 && (
                   <Button size="sm" variant="secondary" icon="restart_alt" onClick={handleEnableAll}>
-                    Active All
+                    <span className="hidden xl:inline">{translate("Active All")}</span>
+                    <span className="sr-only xl:hidden">{translate("Active All")}</span>
                   </Button>
                 )}
                 {activeIds.length > 0 && (
                   <Button size="sm" variant="secondary" icon="block" onClick={() => handleDisableAll(activeIds)}>
-                    Disable All
+                    <span className="hidden xl:inline">{translate("Disable All")}</span>
+                    <span className="sr-only xl:hidden">{translate("Disable All")}</span>
                   </Button>
                 )}
               </div>
             );
-          })()}
+            })()}
+          </div>
         </div>
         {!!modelsTestError && (
           <p className="text-xs text-red-500 mb-3 break-words">{modelsTestError}</p>
+        )}
+        {!!liveModelsWarning && (
+          <p className="mb-3 break-words text-xs text-amber-600 dark:text-amber-400">
+            {liveModelsLoaded
+              ? `${translate("Some live model catalogs could not be loaded.")} ${liveModelsWarning}`
+              : `${translate("Live catalog unavailable; showing the built-in catalog.")} ${liveModelsWarning}`}
+          </p>
         )}
         {renderModelsSection()}
       </Card>

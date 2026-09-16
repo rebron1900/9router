@@ -148,9 +148,10 @@ describe("standard route budget at the executor boundary", () => {
     }
   });
 
-  it("keeps the deadline alive after the first response chunk", async () => {
+  it("stops the route deadline after the first committed response chunk", async () => {
     vi.useFakeTimers();
-    const budget = createStandardRouteBudget({ maxAttempts: 2, timeoutMs: 100 });
+    const parent = new AbortController();
+    const budget = createStandardRouteBudget({ maxAttempts: 2, timeoutMs: 100, signal: parent.signal });
     const encoder = new TextEncoder();
     const source = new ReadableStream({
       start(controller) {
@@ -162,10 +163,13 @@ describe("standard route budget at the executor boundary", () => {
     const reader = response.body.getReader();
     try {
       await expect(reader.read()).resolves.toMatchObject({ done: false });
+      budget.commit();
       expect(budget.signal.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(101);
+      expect(budget.signal.aborted).toBe(false);
+      expect(budget.snapshot()).toMatchObject({ committed: true, timedOut: false });
+      parent.abort();
       expect(budget.signal.aborted).toBe(true);
-      await expect(reader.read()).rejects.toMatchObject({ code: "STANDARD_ROUTE_BUDGET_EXHAUSTED" });
     } finally {
       try { await reader.cancel(); } catch { /* stream already errored */ }
       budget.dispose();

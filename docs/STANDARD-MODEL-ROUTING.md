@@ -104,6 +104,9 @@ For streaming, fallback is allowed only before any irreversible event is sent
 to the client. Once response metadata, text, or a tool-call event has been
 committed, the current stream must terminate; 9router must not concatenate a
 second provider's stream.
+The shared route deadline is released at that commit point so long-running
+reasoning can finish under the stream's inter-chunk stall watchdog; the
+deadline still protects preflight and provider switching.
 
 Responses continuations carrying `previous_response_id` or provider-owned
 state require strict affinity to the original provider/account. Cross-provider

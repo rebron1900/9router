@@ -1,3 +1,14 @@
+# v0.5.81 (2026-09-16)
+
+## Features
+- **Usage dashboard**: improve analytics layout, token unit formatting, responsive tables, chart interactions, and provider/model breakdown cards.
+- **CommandCode**: add quota tracking through the billing credits endpoint with clearer authentication and plan-access errors.
+- **Model management**: unify provider model catalogs, support live model discovery, and improve model visibility controls and responsive presentation.
+
+## Fixes
+- **Usage charts**: add interactive donut segments with tooltips, linked legends, responsive scrolling, and stable single-segment rendering.
+- **Internationalization**: complete translations for the newly added provider and usage-management UI.
+
 # v0.5.80 (2026-09-15)
 
 ## Fixes

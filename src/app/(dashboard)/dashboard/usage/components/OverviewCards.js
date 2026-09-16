@@ -2,6 +2,7 @@
 
 import PropTypes from "prop-types";
 import Card from "@/shared/components/Card";
+import { formatExactTokens, formatTokens } from "@/shared/utils/formatTokens";
 
 const fmt = (n) => new Intl.NumberFormat().format(n || 0);
 const fmtCost = (n) => `$${(n || 0).toFixed(2)}`;
@@ -15,15 +16,15 @@ export default function OverviewCards({ stats }) {
       </Card>
       <Card className="flex min-w-0 flex-col gap-1 px-4 py-3">
         <span className="text-text-muted text-sm uppercase font-semibold">Total Input Tokens</span>
-        <span className="truncate text-2xl font-bold text-primary">{fmt(stats.totalPromptTokens)}</span>
+        <span className="truncate text-2xl font-bold text-primary" title={formatExactTokens(stats.totalPromptTokens)}>{formatTokens(stats.totalPromptTokens)}</span>
       </Card>
       <Card className="flex min-w-0 flex-col gap-1 px-4 py-3">
         <span className="text-text-muted text-sm uppercase font-semibold">Cached Tokens</span>
-        <span className="truncate text-2xl font-bold text-info">{fmt(stats.totalCachedTokens)}</span>
+        <span className="truncate text-2xl font-bold text-info" title={formatExactTokens(stats.totalCachedTokens)}>{formatTokens(stats.totalCachedTokens)}</span>
       </Card>
       <Card className="flex min-w-0 flex-col gap-1 px-4 py-3">
         <span className="text-text-muted text-sm uppercase font-semibold">Output Tokens</span>
-        <span className="truncate text-2xl font-bold text-success">{fmt(stats.totalCompletionTokens)}</span>
+        <span className="truncate text-2xl font-bold text-success" title={formatExactTokens(stats.totalCompletionTokens)}>{formatTokens(stats.totalCompletionTokens)}</span>
       </Card>
       <Card className="flex min-w-0 flex-col gap-1 px-4 py-3">
         <span className="text-text-muted text-sm uppercase font-semibold">Est. Cost</span>

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
 import PropTypes from "prop-types";
 import Card from "@/shared/components/Card";
 import Badge from "@/shared/components/Badge";
+import { formatExactTokens, formatTokens } from "@/shared/utils/formatTokens";
 
 const fmt = (n) => new Intl.NumberFormat().format(n || 0);
 const fmtCost = (n) => `$${(n || 0).toFixed(2)}`;
@@ -36,16 +37,16 @@ function ValueCells({ item, viewMode, isSummary = false }) {
     return (
       <>
         <td className="px-6 py-3 text-right text-text-muted">
-          {isSummary && item.promptTokens === undefined ? "—" : fmt(item.promptTokens)}
+          {isSummary && item.promptTokens === undefined ? "—" : <span title={formatExactTokens(item.promptTokens)}>{formatTokens(item.promptTokens)}</span>}
         </td>
         <td className="px-6 py-3 text-right text-text-muted">
-          {item.cachedTokens ? fmt(item.cachedTokens) : "—"}
+          {item.cachedTokens ? <span title={formatExactTokens(item.cachedTokens)}>{formatTokens(item.cachedTokens)}</span> : "—"}
         </td>
         <td className="px-6 py-3 text-right text-text-muted">
-          {isSummary && item.completionTokens === undefined ? "—" : fmt(item.completionTokens)}
+          {isSummary && item.completionTokens === undefined ? "—" : <span title={formatExactTokens(item.completionTokens)}>{formatTokens(item.completionTokens)}</span>}
         </td>
         <td className="px-6 py-3 text-right font-medium">
-          {fmt(item.totalTokens)}
+          <span title={formatExactTokens(item.totalTokens)}>{formatTokens(item.totalTokens)}</span>
         </td>
       </>
     );

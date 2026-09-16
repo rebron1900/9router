@@ -167,16 +167,17 @@ function commandCodeErrorMessage(value, depth = 0) {
 
 /**
  * A 520 response is Cloudflare's non-standard transient gateway status. The
- * CommandCode gateway also reports the same condition as a 503 body-level
- * error with this wording. These failures are safe to retry before locking an
- * account because no model output has been committed yet.
+ * CommandCode gateway also reports the same condition as a 503/500 body-level
+ * error with this wording (notably when its HTTP/2 connection receives a
+ * GOAWAY). These failures are safe to retry before locking an account because
+ * no model output has been committed yet.
  */
 export function isTransientCommandCodeError(status, message) {
   const code = Number(status) || 0;
   if (code === 520) return true;
-  if (![502, 503, 504].includes(code)) return false;
+  if (![500, 502, 503, 504].includes(code)) return false;
   const text = String(message || "").toLowerCase();
-  return /gateway request failed|invalid error response format|bad gateway|upstream gateway|temporarily unavailable|service unavailable/.test(text);
+  return /gateway request failed|invalid error response format|bad gateway|upstream gateway|temporarily unavailable|service unavailable|goaway|cannot connect to api|http\/2/.test(text);
 }
 
 export function inspectAndWrapCommandCodeResponse(originalResponse, model, imageCount = 0) {
