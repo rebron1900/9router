@@ -2,6 +2,7 @@ import { PROVIDERS, PROVIDER_OAUTH } from "../../config/providers.js";
 import { OAUTH_ENDPOINTS, GITHUB_COPILOT, buildKimiHeaders } from "../../config/appConstants.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
+import { getWorkBuddyIdentity } from "../../shared/workbuddyAuth.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
 
 let _xaiServiceSingleton = null;
@@ -573,28 +574,53 @@ export async function refreshCodebuddyToken(refreshToken, log) {
   }, log);
 }
 
-export async function refreshCodebuddyIntlToken(refreshToken, log) {
+export async function refreshCodebuddyIntlToken(
+  refreshToken,
+  log,
+  providerId = "codebuddy-intl",
+  domain = "www.codebuddy.ai",
+  source = "plugin",
+  providerSpecificData = {},
+  proxyOptions = null,
+) {
   if (!refreshToken) return null;
-  return dedupRefresh("codebuddy-intl", refreshToken, async () => {
-    const oauth = PROVIDER_OAUTH["codebuddy-intl"] || {};
-    const response = await fetch(oauth.refreshUrl, {
+  return dedupRefresh(providerId, refreshToken, async () => {
+    const oauth = PROVIDER_OAUTH[providerId] || {};
+    const isWorkBuddy = providerId === "workbuddy";
+    const headers = isWorkBuddy
+      ? {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/plain, */*",
+          "User-Agent": oauth.userAgent,
+          "X-Requested-With": "XMLHttpRequest",
+          Origin: "https://www.workbuddy.ai",
+          Referer: "https://www.workbuddy.ai/",
+          "X-Refresh-Token": refreshToken,
+          "X-Auth-Refresh-Source": source,
+          ...(providerSpecificData.enterpriseId
+            ? { "X-Enterprise-Id": String(providerSpecificData.enterpriseId) }
+            : {}),
+        }
+      : {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": oauth.userAgent,
+          "X-Requested-With": "XMLHttpRequest",
+          "X-Domain": domain,
+          "X-Refresh-Token": refreshToken,
+          "X-Auth-Refresh-Source": source,
+          "X-Product": "SaaS",
+        };
+    const fetchFn = isWorkBuddy ? proxyAwareFetch : fetch;
+    const response = await fetchFn(oauth.refreshUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": oauth.userAgent,
-        "X-Requested-With": "XMLHttpRequest",
-        "X-Domain": "www.codebuddy.ai",
-        "X-Refresh-Token": refreshToken,
-        "X-Auth-Refresh-Source": "plugin",
-        "X-Product": "SaaS",
-      },
-      body: "{}",
-    });
+      headers,
+      body: isWorkBuddy ? "" : "{}",
+    }, proxyOptions);
 
     if (!response.ok) {
       const errorText = await response.text();
-      log?.error?.("TOKEN_REFRESH", "Failed to refresh CodeBuddy intl token", {
+      log?.error?.("TOKEN_REFRESH", `Failed to refresh ${isWorkBuddy ? "WorkBuddy" : "CodeBuddy intl"} token`, {
         status: response.status,
         error: errorText,
       });
@@ -603,14 +629,14 @@ export async function refreshCodebuddyIntlToken(refreshToken, log) {
 
     const data = await response.json();
     if (data.code !== 0 || !data.data?.accessToken) {
-      log?.error?.("TOKEN_REFRESH", "CodeBuddy intl token refresh returned no token", {
+      log?.error?.("TOKEN_REFRESH", `${isWorkBuddy ? "WorkBuddy" : "CodeBuddy intl"} token refresh returned no token`, {
         code: data.code,
         msg: data.msg,
       });
       return null;
     }
 
-    log?.info?.("TOKEN_REFRESH", "Successfully refreshed CodeBuddy intl token", {
+    log?.info?.("TOKEN_REFRESH", `Successfully refreshed ${isWorkBuddy ? "WorkBuddy" : "CodeBuddy intl"} token`, {
       hasNewAccessToken: !!data.data.accessToken,
       hasNewRefreshToken: !!data.data.refreshToken,
       expiresIn: data.data.expiresIn,
@@ -620,6 +646,17 @@ export async function refreshCodebuddyIntlToken(refreshToken, log) {
       accessToken: data.data.accessToken,
       refreshToken: data.data.refreshToken || refreshToken,
       expiresIn: data.data.expiresIn,
+      // WorkBuddy identity can move with the new token (tenant/domain change, or
+      // a first login whose account probe failed). Prefer the refresh response's
+      // explicit domain, then the new access-token claims; the shared credential
+      // merge keeps any field this refresh could not derive.
+      ...(isWorkBuddy
+        ? {
+            providerSpecificData: getWorkBuddyIdentity(data.data.accessToken, {
+              domain: data.data.domain,
+            }),
+          }
+        : {}),
     };
   }, log);
 }

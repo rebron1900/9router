@@ -173,6 +173,12 @@ const PROVIDER_MODELS_CONFIG = {
       warning: "CodeBuddy does not expose a public models endpoint; using its built-in provider model catalog.",
     }),
   },
+  workbuddy: {
+    customResolver: async () => ({
+      models: getStaticProviderModels("workbuddy"),
+      warning: "WorkBuddy exposes no public model catalog (its console is login-gated); using the verified built-in model catalog.",
+    }),
+  },
   antigravity: {
     url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
     method: "POST",

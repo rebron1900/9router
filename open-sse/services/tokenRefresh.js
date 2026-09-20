@@ -156,6 +156,15 @@ const REFRESH_HANDLERS = {
   gcli: (c, log) => refreshXaiToken(c.refreshToken, log),
   "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log),
   "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log),
+  workbuddy: (c, log, proxyOptions) => refreshCodebuddyIntlToken(
+    c.refreshToken,
+    log,
+    "workbuddy",
+    c.providerSpecificData?.domain || "www.workbuddy.ai",
+    "workbuddy",
+    c.providerSpecificData,
+    proxyOptions,
+  ),
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log),
   cline: (c, log) => refreshClineToken(c.refreshToken, log),
   // ClinePass shares Cline's WorkOS auth endpoints, so the same refresh works.
@@ -189,10 +198,12 @@ async function _getAccessTokenInternal(provider, credentials, log) {
   return handler(credentials, log);
 }
 
-export async function refreshTokenByProvider(provider, credentials, log) {
+export async function refreshTokenByProvider(provider, credentials, log, proxyOptions = null) {
   if (!credentials.refreshToken) return null;
   const handler = REFRESH_HANDLERS[provider];
-  return handler ? handler(credentials, log) : refreshAccessToken(provider, credentials.refreshToken, credentials, log);
+  return handler
+    ? handler(credentials, log, proxyOptions)
+    : refreshAccessToken(provider, credentials.refreshToken, credentials, log);
 }
 
 export function formatProviderCredentials(provider, credentials, log) {

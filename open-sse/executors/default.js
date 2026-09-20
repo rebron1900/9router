@@ -7,6 +7,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import crypto from "node:crypto";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -42,6 +43,18 @@ const HEADER_HOOKS = {
   kimiHeaders: (h, c) => Object.assign(h, buildKimiHeaders(c?.providerSpecificData?.deviceId)),
   clineHeaders: (h, c) => Object.assign(h, buildClineHeaders(c.apiKey || c.accessToken)),
   kilocodeOrg: (h, c) => { if (c.providerSpecificData?.orgId) h["X-Kilocode-OrganizationID"] = c.providerSpecificData.orgId; },
+  workbuddyIdentity: (h, c) => {
+    const data = c?.providerSpecificData || {};
+    h["X-Request-ID"] = crypto.randomBytes(16).toString("hex");
+    h["X-Request-Trace-Id"] = crypto.randomUUID();
+    if (PROVIDERS.workbuddy?.product) h["X-Product"] = PROVIDERS.workbuddy.product;
+    if (data.uid) h["X-User-Id"] = String(data.uid);
+    else h["X-No-User-Id"] = "1";
+    if (data.enterpriseId) h["X-Enterprise-Id"] = String(data.enterpriseId);
+    else h["X-No-Enterprise-Id"] = "1";
+    if (data.domain) h["X-Domain"] = String(data.domain);
+    else h["X-No-Department-Info"] = "1";
+  },
 };
 
 // Config-driven OAuth refresh grants — derived from registry oauth.refresh.

@@ -283,6 +283,35 @@ export const PROVIDER_CAPABILITIES = {
     // contract). maxOutput 128000 per the server's product-config payload.
     "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
   },
+  // WorkBuddy (workbuddy.ai) — the whole catalog comes from the CLI
+  // product-config payload (maxInputTokens → contextWindow, maxOutputTokens →
+  // maxOutput, supportsImages → vision, supportsReasoning → reasoning,
+  // reasoning.canDisableThinking → thinkingCanDisable). hy4-preview was also
+  // verified live against a connected account (2026-09-20): image content parts
+  // are accepted and grounded, reasoning_content is emitted on every request and
+  // cannot be turned off (reasoning_effort:"none", thinking:{type:"disabled"} and
+  // chat_template_kwargs.enable_thinking:false all still reasoned) — all matching
+  // the payload. Every listed id answered 200 on this gateway.
+  "workbuddy": {
+    "default-model":    { vision: true, contextWindow: 176000, maxOutput: 24000 },
+    "fast-model":       { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 200000, maxOutput: 32000 },
+    "balanced-model":   { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 256000, maxOutput: 32000 },
+    "primary-model":    { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 72000 },
+    "deep-model":       { vision: true, contextWindow: 176000, maxOutput: 24000 },
+    "hy4-preview":      { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 64000 },
+    "hy3":              { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 192000, maxOutput: 64000 },
+    "gpt-5.6-sol":      { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+    "gpt-5.6-terra":    { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+    "gpt-5.6-luna":     { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+    "gpt-5.5":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+    "gpt-5.4":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 272000, maxOutput: 72000 },
+    "gpt-5.3-codex":    { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 72000 },
+    "gemini-3.5-flash": { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 65536 },
+    "glm-5.3":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 48000 },
+    "glm-5.2":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 48000 },
+    "kimi-k3":          { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 32000 },
+    "kimi-k2.6":        { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 256000, maxOutput: 32000 },
+  },
   // Qoder — upstream exposes opaque internal ids (dfmodel, kmodel, …); the
   // registry `name` is display-only and capability lookup matches on the raw
   // id, so every qoder model would fall through to DEFAULT_CAPABILITIES

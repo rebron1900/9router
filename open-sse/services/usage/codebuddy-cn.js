@@ -1,8 +1,8 @@
 /**
- * CodeBuddy CN usage handler
+ * CodeBuddy / WorkBuddy usage handlers
  *
- * Scoped to the "codebuddy-cn" provider specifically — a future "codebuddy-intl"
- * variant would get its own handler/endpoint, so keep this CN-only.
+ * CodeBuddy CN and WorkBuddy share the nested Tencent billing response shape;
+ * WorkBuddy additionally requires account identity headers and a date-range body.
  *
  * Quota lives behind a Tencent billing endpoint (POST, payload wrapped twice
  * under data.Response.Data). It mixes two credit types that must NOT be merged:
@@ -49,34 +49,68 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
     return { message: `CodeBuddy (${providerId}) credential not available.` };
   }
 
-  try {
-    const response = await proxyAwareFetch(U(providerId).url, {
-      method: "POST",
-      headers: {
+  const isWorkBuddy = providerId === "workbuddy";
+  const identity = providerSpecificData || {};
+  const headers = isWorkBuddy
+    ? {
+        "Content-Type": "application/json",
+        Accept: PROVIDERS[providerId]?.billingAccept || "application/json",
+        "User-Agent": PROVIDERS[providerId]?.headers?.["User-Agent"],
+        Authorization: `Bearer ${token}`,
+        Origin: "https://www.workbuddy.ai",
+        Referer: "https://www.workbuddy.ai/",
+        ...(identity.uid ? { "X-User-Id": String(identity.uid) } : {}),
+        ...(identity.enterpriseId ? {
+          "X-Enterprise-Id": String(identity.enterpriseId),
+          "X-Tenant-Id": String(identity.enterpriseId),
+        } : {}),
+        ...(identity.domain ? { "X-Domain": String(identity.domain) } : {}),
+      }
+    : {
         ...(PROVIDERS[providerId]?.headers || {}),
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Accept: "application/json",
-      },
-      body: "{}",
+      };
+  const body = isWorkBuddy
+    ? (() => {
+        const now = new Date();
+        const end = new Date(now.getTime() + 365 * 101 * 24 * 60 * 60 * 1000);
+        const formatTime = (value) => value.toISOString().slice(0, 19).replace("T", " ");
+        return JSON.stringify({
+          PageNumber: 1,
+          PageSize: 100,
+          ProductCode: "p_tcaca",
+          Status: [0, 3],
+          PackageEndTimeRangeBegin: formatTime(now),
+          PackageEndTimeRangeEnd: formatTime(end),
+        });
+      })()
+    : "{}";
+
+  try {
+    const response = await proxyAwareFetch(U(providerId).url, {
+      method: "POST",
+      headers,
+      body,
     }, proxyOptions);
 
     if (response.status === 401 || response.status === 403) {
-      return { message: "CodeBuddy CN credential invalid or expired." };
+      return { message: `${isWorkBuddy ? "WorkBuddy" : "CodeBuddy"} credential invalid or expired.` };
     }
     if (!response.ok) {
-      return { message: `CodeBuddy CN quota API error (${response.status}).` };
+      return { message: `${isWorkBuddy ? "WorkBuddy" : "CodeBuddy"} quota API error (${response.status}).` };
     }
 
     const json = await response.json();
     if (json?.code !== 0) {
-      return { message: `CodeBuddy CN quota error: ${json?.msg || "unknown"}` };
+      return { message: `${isWorkBuddy ? "WorkBuddy" : "CodeBuddy"} quota error: ${json?.msg || "unknown"}` };
     }
 
     const data = json?.data?.Response?.Data || {};
     const accounts = Array.isArray(data.Accounts) ? data.Accounts : [];
     if (accounts.length === 0) {
-      return { message: "CodeBuddy CN connected. No credit package found." };
+      return { message: `${isWorkBuddy ? "WorkBuddy" : "CodeBuddy CN"} connected. No credit package found.` };
     }
 
     const cycleEndMs = (acc) => {
@@ -133,7 +167,7 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
 
     return { plan, quotas };
   } catch (error) {
-    return { message: `CodeBuddy (${providerId}) error: ${error.message}` };
+    return { message: `${isWorkBuddy ? "WorkBuddy" : `CodeBuddy (${providerId})`} error: ${error.message}` };
   }
 }
 
@@ -143,4 +177,8 @@ export async function getCodeBuddyCnUsage(accessToken, apiKey, providerSpecificD
 
 export async function getCodeBuddyIntlUsage(accessToken, apiKey, providerSpecificData, proxyOptions = null) {
   return getCodeBuddyUsage("codebuddy-intl", accessToken, apiKey, providerSpecificData, proxyOptions);
+}
+
+export async function getWorkBuddyUsage(accessToken, apiKey, providerSpecificData, proxyOptions = null) {
+  return getCodeBuddyUsage("workbuddy", accessToken, apiKey, providerSpecificData, proxyOptions);
 }

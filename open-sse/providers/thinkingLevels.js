@@ -52,6 +52,19 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-cn", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
   { provider: "codebuddy-cn", pattern: "hy3*",         levels: ["low", "high"] },
   { provider: "codebuddy-cn", pattern: "hy4*",         levels: ["high"] },
+  // WorkBuddy's CLI product-config publishes reasoning.supportedEfforts per
+  // model (same field as codebuddy-cn). Models without a published set
+  // (gpt-5.3-codex, gemini-3.5-flash, kimi-k3, kimi-k2.6, *-model) fall through
+  // to the openai format default / the generic codex pattern.
+  { provider: "workbuddy", pattern: "*gpt-5.6-sol*",   levels: ["low", "medium", "high", "xhigh", "max"] },
+  { provider: "workbuddy", pattern: "*gpt-5.6-terra*", levels: ["low", "medium", "high", "xhigh", "max"] },
+  { provider: "workbuddy", pattern: "*gpt-5.6-luna*",  levels: ["low", "medium", "high", "xhigh", "max"] },
+  { provider: "workbuddy", pattern: "*gpt-5.5*",       levels: ["low", "medium", "high", "xhigh"] },
+  { provider: "workbuddy", pattern: "*gpt-5.4*",       levels: ["low", "medium", "high", "xhigh"] },
+  { provider: "workbuddy", pattern: "glm-5.3*",        levels: ["low", "high", "max"] },
+  { provider: "workbuddy", pattern: "glm-5.2*",        levels: ["high", "xhigh"] },
+  { provider: "workbuddy", pattern: "hy4*",            levels: ["high"] },
+  { provider: "workbuddy", pattern: "hy3*",            levels: ["low", "high"] },
 ];
 
 // Returns valid thinking levels for a model, or null when the model has no reasoning.
