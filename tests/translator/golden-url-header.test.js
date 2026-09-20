@@ -24,14 +24,21 @@ const SPECIALIZED = new Set([
 ]);
 
 // Sanitize header: khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
+// Per-request correlation headers are regenerated on every call (WorkBuddy's
+// identity hook), so mask them by KEY — a value pattern would risk masking a
+// meaningful header from another provider.
+const DYNAMIC_HEADERS = new Set(["X-Request-ID", "X-Request-Trace-Id"]);
+
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    out[k] = typeof v === "string"
-      ? v.replace(/Bearer .+/, "Bearer <TOK>")
-          .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
-          .replace(/kimi-\d{10,}/g, "kimi-<TS>")
-      : v;
+    out[k] = DYNAMIC_HEADERS.has(k)
+      ? "<DYN>"
+      : typeof v === "string"
+        ? v.replace(/Bearer .+/, "Bearer <TOK>")
+            .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
+            .replace(/kimi-\d{10,}/g, "kimi-<TS>")
+        : v;
   }
   return out;
 }
