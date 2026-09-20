@@ -101,6 +101,41 @@ describe("canonicalizeUsage", () => {
     expect(twice.completion_tokens).toBe(50);
   });
 
+  it("does not let a stale top-level cached_tokens:0 mask a nested cache hit", () => {
+    // WorkBuddy / CodeBuddy gateways always emit a top-level `cached_tokens: 0`
+    // while the real cache-read count sits in prompt_tokens_details (and
+    // prompt_cache_hit_tokens). `??` treats 0 as present, so a top-level-first
+    // read reports 0 cached tokens on every cache hit — and the dashboard shows
+    // a ~0% hit rate for a request the gateway actually billed as cached.
+    // Shape captured from a live WorkBuddy response (2026-09-20).
+    const out = canonicalizeUsage({
+      prompt_tokens: 1994,
+      completion_tokens: 59,
+      total_tokens: 2053,
+      cached_tokens: 0,
+      prompt_cache_hit_tokens: 1920,
+      prompt_cache_miss_tokens: 74,
+      prompt_tokens_details: { cached_tokens: 1920 },
+      completion_tokens_details: { cached_tokens: 0, reasoning_tokens: 56 },
+    });
+    expect(out.cached_tokens).toBe(1920);
+    expect(out.prompt_tokens).toBe(1994);
+    expect(out.completion_tokens).toBe(59);
+    expect(out.reasoning_tokens).toBe(56);
+  });
+
+  it("keeps a genuine cache miss at zero when every alias reports 0", () => {
+    const out = canonicalizeUsage({
+      prompt_tokens: 1994,
+      completion_tokens: 59,
+      cached_tokens: 0,
+      prompt_cache_hit_tokens: 0,
+      prompt_cache_miss_tokens: 1994,
+      prompt_tokens_details: { cached_tokens: 0 },
+    });
+    expect(out.cached_tokens).toBe(0);
+  });
+
   it("returns null for invalid input", () => {
     expect(canonicalizeUsage(null)).toBeNull();
     expect(canonicalizeUsage(undefined)).toBeNull();

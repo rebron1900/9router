@@ -280,11 +280,16 @@ export function canonicalizeUsage(usage) {
     // Mirror the cacheCreation fallback above: buildUsage() only ever emits the
     // nested prompt_tokens_details.cached_tokens shape, so without this the
     // cache-read count is silently dropped on every buildUsage()-derived usage.
-    cached = num(
-      usage.cached_tokens ??
-      usage.prompt_tokens_details?.cached_tokens ??
-      usage.input_tokens_details?.cached_tokens ??
-      usage.prompt_cache_hit_tokens,
+    // Every alias below counts the same quantity (cache-read tokens), but some
+    // gateways (WorkBuddy/CodeBuddy) pin the top-level `cached_tokens` to 0 while
+    // the real count lives in prompt_tokens_details / prompt_cache_hit_tokens.
+    // `??` treats that 0 as present, so take the largest reported count instead of
+    // the first — a genuine miss reports 0 everywhere and stays 0.
+    cached = Math.max(
+      num(usage.cached_tokens),
+      num(usage.prompt_tokens_details?.cached_tokens),
+      num(usage.input_tokens_details?.cached_tokens),
+      num(usage.prompt_cache_hit_tokens),
     );
   }
 
