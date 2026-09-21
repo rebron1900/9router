@@ -21,6 +21,8 @@ const CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS = ["selected model is at capacity", "m
 const CODEX_SSE_USER_OUTPUT_PATTERNS = [
   "event: response.output_text.delta",
   "event: response.function_call_arguments.delta",
+  "event: response.reasoning_summary_text.delta",
+  '"type":"response.reasoning_summary_text.delta"',
   '"type":"response.output_text.delta"',
   '"type":"response.function_call_arguments.delta"',
 ];
@@ -295,7 +297,7 @@ export class CodexExecutor extends BaseExecutor {
     let attempt = 0;
     while (true) {
       const result = await super.execute(args);
-      const peek = await this._peekSseTransientError(result.response);
+      const peek = await this._peekSseTransientError(result.response, args.attemptBudget?.signal || args.signal);
       if (!peek.matched) {
         // Replace body with re-assembled stream (prefix bytes already read + rest)
         if (peek.replacementBody) {
@@ -327,7 +329,7 @@ export class CodexExecutor extends BaseExecutor {
   // Peek first N bytes of SSE body to detect upstream transient errors.
   // Returns { matched: string|null, message: string|null, accountFallback: boolean, replacementBody: ReadableStream|null }.
   // Caller must use replacementBody when no error matched (original body has been read).
-  async _peekSseTransientError(response) {
+  async _peekSseTransientError(response, signal = null) {
     if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -337,8 +339,12 @@ export class CodexExecutor extends BaseExecutor {
     let accountFallback = false;
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
+        if (signal?.aborted) throw signal.reason || new Error("Request aborted");
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          if (signal?.aborted) throw signal.reason || new Error("Request aborted");
+          break;
+        }
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
         const lowerText = text.toLowerCase();
@@ -349,7 +355,10 @@ export class CodexExecutor extends BaseExecutor {
         if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) break;
       }
     } catch (e) {
-      dbg("CODEX", `peek read error: ${e.message}`);
+      try { await reader.cancel(e); } catch { /* upstream may already be aborted */ }
+      try { reader.releaseLock(); } catch { /* already released */ }
+      if (signal?.aborted) throw signal.reason || e;
+      throw e;
     }
 
     if (matched) {

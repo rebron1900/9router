@@ -1,10 +1,9 @@
 /**
  * Helpers shared by model discovery and its acceptance tests.
  *
- * A compatible provider is an explicit model registry.  The provider's
- * enabledModels array is authoritative when present, including an empty
- * array.  Persisted custom models and aliases are registered additions; an
- * upstream /models response is never implicitly promoted to discovery.
+ * A compatible provider may persist successful upstream model discovery.
+ * The provider's enabledModels array is authoritative when present, including
+ * an empty array. Persisted custom models and aliases are registered additions.
  */
 
 export function normalizeModelIds(values) {

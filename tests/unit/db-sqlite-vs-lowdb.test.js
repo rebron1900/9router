@@ -260,6 +260,31 @@ describe("DB SQLite layer — public API parity", () => {
     expect((await sqliteDb.getModelAliases()).alias1).toBeUndefined();
   });
 
+  it("provider model catalog: upsert, stale retention, and export/import", async () => {
+    await sqliteDb.upsertProviderModelCatalog("catalog-provider", [
+      { id: "catalog-model", name: "Catalog Model", capabilities: { vision: true } },
+      { id: "removed-model", name: "Removed Model" },
+    ]);
+    await sqliteDb.upsertProviderModelCatalog("catalog-provider", [
+      { id: "catalog-model", name: "Updated Model", contextLength: 128000 },
+    ]);
+    const rows = await sqliteDb.getProviderModelCatalog("catalog-provider");
+    expect(rows.find((row) => row.modelId === "catalog-model")).toMatchObject({
+      name: "Updated Model",
+      contextLength: 128000,
+      stale: false,
+    });
+    expect(rows.find((row) => row.modelId === "removed-model")).toMatchObject({ stale: true });
+
+    const snapshot = await sqliteDb.exportDb();
+    expect(snapshot.providerModelCatalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerId: "catalog-provider", modelId: "catalog-model" }),
+    ]));
+    await sqliteDb.clearProviderModelCatalog("catalog-provider");
+    await sqliteDb.importDb(snapshot);
+    expect((await sqliteDb.getProviderModelCatalog("catalog-provider"))).toHaveLength(2);
+  });
+
   it("customModels: add/list/delete with dedupe", async () => {
     const ok1 = await sqliteDb.addCustomModel({ providerAlias: "p1", id: "m1", type: "llm", name: "Model 1" });
     const dup = await sqliteDb.addCustomModel({ providerAlias: "p1", id: "m1", type: "llm" });

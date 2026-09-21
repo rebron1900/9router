@@ -1,6 +1,7 @@
 // Re-export from open-sse with localDb integration
-import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
+import { getModelAliases, getComboByName, getProviderNodes, getProviderNodeById } from "@/lib/localDb";
 import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 
 // Local provider alias overrides (HMR-friendly, applied on top of open-sse map)
@@ -45,25 +46,22 @@ export async function getModelInfo(modelStr) {
       const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
       const matchedOpenAI = openaiNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedOpenAI) {
-        return { provider: matchedOpenAI.id, model: parsed.model };
+        return withNodeDisplayName({ provider: matchedOpenAI.id, model: parsed.model, node: matchedOpenAI });
       }
 
       const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
       const matchedAnthropic = anthropicNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedAnthropic) {
-        return { provider: matchedAnthropic.id, model: parsed.model };
+        return withNodeDisplayName({ provider: matchedAnthropic.id, model: parsed.model, node: matchedAnthropic });
       }
 
       const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
       const matchedEmbedding = embeddingNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedEmbedding) {
-        return { provider: matchedEmbedding.id, model: parsed.model };
+        return withNodeDisplayName({ provider: matchedEmbedding.id, model: parsed.model, node: matchedEmbedding });
       }
     }
-    return {
-      provider: parsed.provider,
-      model: parsed.model
-    };
+    return withNodeDisplayName({ provider: parsed.provider, model: parsed.model });
   }
 
   // Check if this is a combo name before resolving as alias
@@ -75,7 +73,24 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
-  return getModelInfoCore(modelStr, getModelAliases);
+  const resolved = await getModelInfoCore(modelStr, getModelAliases);
+  return withNodeDisplayName(resolved);
+}
+
+// Custom provider nodes are identified by opaque generated ids
+// (e.g. "openai-compatible-chat-<uuid>"). Attach the user-configured node
+// name so log/display sites can render "opencode zen/…" instead of the raw id.
+async function withNodeDisplayName({ provider, model, node = null } = {}) {
+  if (!provider || typeof provider !== "string") return { provider, model };
+  if (!isOpenAICompatibleProvider(provider) && !isAnthropicCompatibleProvider(provider) && !isCustomEmbeddingProvider(provider)) {
+    return { provider, model };
+  }
+  const matched = node || await getProviderNodeById(provider).catch(() => null);
+  return {
+    provider,
+    model,
+    ...(matched?.name ? { providerName: matched.name } : {}),
+  };
 }
 
 /**

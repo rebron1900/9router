@@ -244,7 +244,7 @@ export default function ModelControlModal({
       setLoading(true);
       setError("");
       try {
-          const [modelsData, disabledData, standardModelsData, combosData] = await Promise.all([
+        const [modelsData, disabledData, standardModelsData, combosData] = await Promise.all([
             readJson("/api/models?includeDisabled=true&kind=all"),
             readJson("/api/models/disabled"),
             readJson("/api/models/standard"),
@@ -271,7 +271,7 @@ export default function ModelControlModal({
         for (const result of liveResults) {
           if (result.status !== "fulfilled") continue;
           for (const model of result.value.models) {
-              models.push({
+            models.push({
                 ...model,
                 provider: result.value.connection.provider,
                 providerAlias: getProviderAlias(result.value.connection.provider),

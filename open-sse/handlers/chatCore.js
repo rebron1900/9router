@@ -61,7 +61,10 @@ export function stripContinuityFields(body) {
 }
 
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, requestSignal, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, modelCapabilities = null, routeContext = null }) {
-  const { provider, model } = modelInfo;
+  const { provider, model, providerName } = modelInfo || {};
+  // Custom provider nodes are addressed by opaque generated ids; display the
+  // user-configured node name (else the raw id, matching built-in providers).
+  const providerLabel = providerName || provider;
   const requestId = createRequestCorrelationId();
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -244,7 +247,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Request line: one correlated summary (fmt + thinking + counts + account)
   if (log?.line) {
-    const clientModel = clientRawRequest?.body?.model || `${provider}/${model}`;
+    const clientModel = clientRawRequest?.body?.model || `${providerLabel}/${model}`;
     const msgN = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || body.messages?.length || body.input?.length || 0;
     const toolN = translatedBody.tools?.length || body.tools?.length || 0;
     const fmtStr = passthrough ? `FMT: ${sourceFormat} (passthrough)` : `FMT: ${sourceFormat}→${targetFormat}`;
@@ -252,7 +255,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const think = showThinking ? log.fmtThink?.(extractThinking(translatedBody)) : null;
     const acc = credentials?.connectionName || credentials?.connectionId?.slice(0, 8) || "-";
     const parts = [
-      `POST ${clientModel} → ${provider}/${model}`,
+      `POST ${clientModel} → ${providerLabel}/${model}`,
       fmtStr,
       stream ? "STREAM" : "JSON",
       `${msgN} MSG`,
@@ -338,7 +341,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
-  log?.debug?.("REQUEST", `${provider.toUpperCase()} | ${model} | ${msgCount} msgs`);
+  log?.debug?.("REQUEST", `${providerLabel.toUpperCase()} | ${model} | ${msgCount} msgs`);
 
   const streamController = createStreamController({
     onDisconnect: (reason) => {
@@ -346,7 +349,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (onDisconnect) onDisconnect(reason);
     },
     onError: () => trackPendingRequest(model, provider, connectionId, false),
-    log, provider, model, reqTag, externalSignal: routeContext?.attemptBudget?.signal || requestSignal, clientSignal: requestSignal
+    log, provider: providerLabel, model, reqTag, externalSignal: routeContext?.attemptBudget?.signal || requestSignal, clientSignal: requestSignal
   });
 
   const proxyOptions = {
@@ -444,7 +447,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     if (log?.errorLine) {
-      log.errorLine(reqTag, "✗", `ERROR 502 · ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}${error.stack ? `\n    ${error.stack}` : ""}`);
+      log.errorLine(reqTag, "✗", `ERROR 502 · ${providerLabel}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}${error.stack ? `\n    ${error.stack}` : ""}`);
     }
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
   }
@@ -469,7 +472,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         return result;
       }, 3, log);
       if (newCredentials?.accessToken || newCredentials?.copilotToken) {
-        if (log?.line) log.line(reqTag, "🔑", `TOKEN REFRESHED · ${provider}/${model}`);
+        if (log?.line) log.line(reqTag, "🔑", `TOKEN REFRESHED · ${providerLabel}/${model}`);
         Object.assign(credentials, newCredentials);
         if (onCredentialsRefreshed) {
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
@@ -498,10 +501,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             || error?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
             throw routeContext.attemptBudget.error();
           }
-          log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
+          log?.warn?.("TOKEN", `${providerLabel.toUpperCase()} | retry after refresh failed`);
         }
       } else {
-        log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`);
+        log?.warn?.("TOKEN", `${providerLabel.toUpperCase()} | refresh failed`);
       }
     } catch (e) {
       if (routeContext?.attemptBudget && (routeContext.attemptBudget.isBudgetError?.(e)
@@ -509,7 +512,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         || e?.code === "STANDARD_ROUTE_BUDGET_EXHAUSTED")) {
         throw routeContext.attemptBudget.error();
       }
-      log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh threw: ${e.message}`);
+      log?.warn?.("TOKEN", `${providerLabel.toUpperCase()} | refresh threw: ${e.message}`);
     }
   }
 
@@ -532,7 +535,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
     if (log?.errorLine) {
       const urlStr = providerUrl ? `\n    URL: ${providerUrl}` : "";
-      log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
+      log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${providerLabel}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
     }
     reqLogger.logError(new Error(message), finalBody || translatedBody);
     return createErrorResult(statusCode, errMsg, resetsAtMs);

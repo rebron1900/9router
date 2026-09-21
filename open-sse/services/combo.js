@@ -315,7 +315,12 @@ export async function handleComboChat({
   failureClassifier = null,
   onAttemptResult = null,
   onAllFailed = null,
+  // Display-only: map a model string (e.g. "openai-compatible-chat-<uuid>/m")
+  // to a friendly label (e.g. "opencode zen/m"). Engine stays provider-agnostic;
+  // the caller (app layer) injects the resolver when it wants named nodes.
+  modelLabel = null,
 }) {
+  const label = modelLabel || ((modelStr) => modelStr);
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -325,7 +330,7 @@ export async function handleComboChat({
     if (required.size > 0) {
       const reordered = reorderByCapabilities(rotatedModels, required, capabilityResolver);
       if (reordered[0] !== rotatedModels[0]) {
-        log.info("COMBO", `auto-switch for [${[...required].join(",")}] → ${reordered[0]}`);
+        log.info("COMBO", `auto-switch for [${[...required].join(",")}] → ${label(reordered[0])}`);
       }
       rotatedModels = reordered;
     }
@@ -344,7 +349,7 @@ export async function handleComboChat({
       budgetExhausted = true;
       break;
     }
-    log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
+    log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${label(modelStr)}`);
 
     try {
       const result = await handleSingleModel(body, modelStr);
@@ -384,14 +389,14 @@ export async function handleComboChat({
           // A telemetry promise must never become an unhandled rejection or
           // change the already-committed response.
         });
-        log.info("COMBO", `Model ${modelStr} returned a deferred response; routing outcome will be recorded after body completion`);
+        log.info("COMBO", `Model ${label(modelStr)} returned a deferred response; routing outcome will be recorded after body completion`);
         return result;
       }
       
       // Success (2xx) - return response
       if (result.ok) {
         try { await onAttemptResult?.({ ok: true, model: modelStr, response: result }); } catch { /* telemetry must not affect routing */ }
-        log.info("COMBO", `Model ${modelStr} succeeded`);
+        log.info("COMBO", `Model ${label(modelStr)} succeeded`);
         return result;
       }
 
@@ -441,7 +446,7 @@ export async function handleComboChat({
       try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
 
       if (!shouldFallback) {
-        log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
+        log.warn("COMBO", `Model ${label(modelStr)} failed (no fallback)`, { status: result.status });
         if (classifiedFailure.category === "budget") {
           lastError = errorText;
           lastStatus = result.status;
@@ -455,14 +460,14 @@ export async function handleComboChat({
       // skipped immediately (fixes: combo falls through on transient 503)
       if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
-        log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
+        log.info("COMBO", `Model ${label(modelStr)} transient ${result.status}, waiting ${cooldownMs}ms before next`);
         if (!await waitWithAbort(cooldownMs, abortSignal)) return errorResponse(499, "Request aborted");
       }
 
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
-      log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      log.warn("COMBO", `Model ${label(modelStr)} failed, trying next`, { status: result.status });
       if (attemptBudget && !attemptBudget.canAttempt()) {
         budgetExhausted = true;
         break;
@@ -487,7 +492,7 @@ export async function handleComboChat({
       if (failure.category === "budget") budgetExhausted = true;
       failures.push(failure);
       try { await onAttemptResult?.(failure); } catch { /* telemetry must not affect routing */ }
-      log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
+      log.warn("COMBO", `Model ${label(modelStr)} threw error, trying next`, { error: lastError });
       if (failure.shouldFallback === false) break;
       if (attemptBudget && !attemptBudget.canAttempt()) {
         budgetExhausted = true;

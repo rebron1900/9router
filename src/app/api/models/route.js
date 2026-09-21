@@ -5,6 +5,7 @@ import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { getModelType } from "open-sse/config/providerModels.js";
+import { getUnifiedProviderModels } from "@/lib/modelCatalog";
 
 function normalizeRequestedKind(value) {
   const kind = String(value || "llm").trim();
@@ -63,13 +64,55 @@ export async function GET(request) {
       .filter((m) => matchesRequestedKind(m.kind, requestedKind))
       .filter((m) => includeDisabled || !m.disabled);
 
+    // Local provider catalogs are durable discovery results. Stale entries remain
+    // available for visibility management, but are not advertised as active models.
+    const catalogModels = await getUnifiedProviderModels();
+    const catalogFullModels = new Set();
+    for (const catalog of catalogModels) {
+      if (catalog?.stale === true && !includeDisabled) continue;
+      const providerId = catalog.providerId;
+      const providerAlias = catalog.providerAlias || getProviderAlias(providerId) || providerId;
+      const id = catalog.modelId;
+      const kind = catalog.kind || "llm";
+      if (!matchesRequestedKind(kind, requestedKind)) continue;
+      const fullModel = `${providerAlias}/${id}`;
+      catalogFullModels.add(fullModel);
+      const disabledIds = new Set([
+        ...(disabled[providerAlias] || []),
+        ...(disabled[providerId] || []),
+      ]);
+      if (!includeDisabled && disabledIds.has(id)) continue;
+      const c = getCapabilitiesForModel(providerId, id);
+      models.push({
+        provider: providerId,
+        model: id,
+        name: catalog.name || id,
+        catalogStale: catalog.stale === true,
+        fullModel,
+        routedModel: fullModel,
+        providerAlias,
+        kind,
+        disabled: disabledIds.has(id),
+        alias: modelAliases[fullModel] || id,
+        caps: {
+          vision: c.vision,
+          search: c.search,
+          reasoning: c.reasoning,
+          contextWindow: c.contextWindow,
+          maxOutput: c.maxOutput,
+          ...(catalog.capabilities || {}),
+        },
+      });
+    }
+
     // Custom models ride along; their stored caps override the name heuristic
     const seenFull = new Set(models.map((m) => m.fullModel));
     const customModels = (await getCustomModels()).filter((m) => {
       if (!m?.id) return false;
       const kind = m.kind || m.type || "llm";
       return matchesRequestedKind(kind, requestedKind)
-        && !seenFull.has(`${m.providerAlias}/${m.id}`);
+        && !seenFull.has(`${m.providerAlias}/${m.id}`)
+        && !catalogFullModels.has(`${m.providerAlias}/${m.id}`);
     });
     for (const m of customModels) {
       const kind = m.kind || m.type || "llm";

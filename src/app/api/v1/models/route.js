@@ -3,7 +3,7 @@ import {
   AI_PROVIDERS,
   getProviderAlias,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels, getStandardModelBindings } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings, getStandardModels, getStandardModelBindings, getProviderModelCatalogs } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
@@ -291,6 +291,13 @@ export async function buildModelsList(kindFilter) {
     console.log("Could not fetch custom models");
   }
 
+  let providerModelCatalog = [];
+  try {
+    providerModelCatalog = await getProviderModelCatalogs();
+  } catch (e) {
+    console.log("Could not fetch provider model catalog");
+  }
+
   let modelAliases = {};
   try {
     modelAliases = await getModelAliases();
@@ -383,10 +390,12 @@ export async function buildModelsList(kindFilter) {
         || staticAlias
       ).trim();
       const providerModels = PROVIDER_MODELS[staticAlias] || [];
+      const catalogModels = providerModelCatalog.filter((model) => model.providerId === providerId && model.stale !== true);
       const enabledModels = conn?.providerSpecificData?.enabledModels;
       const hasExplicitEnabledModels = Array.isArray(enabledModels);
 
       // Build kind lookup for static models so we can filter even when only IDs are exposed
+      const catalogModelById = new Map(catalogModels.map((m) => [m.modelId, m]));
       const staticModelKindById = new Map(
         providerModels.map((m) => [m.id, modelKind(m)])
       );
@@ -395,7 +404,10 @@ export async function buildModelsList(kindFilter) {
 
       let rawModelIds = hasExplicitEnabledModels
         ? normalizeModelIds(enabledModels)
-        : providerModels.map((model) => model.id);
+        : normalizeModelIds([
+          ...providerModels.map((model) => model.id),
+          ...catalogModels.map((model) => model.modelId),
+        ]);
 
       // Config-driven live catalog override (e.g. Kiro returns dynamic
       // -thinking/-agentic variants per account). On failure, fall back to
@@ -483,9 +495,10 @@ export async function buildModelsList(kindFilter) {
         })
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
+      const catalogModelIds = catalogModels.map((model) => model.modelId);
       const mergedModelIds = configuredModelIds({
         connection: conn,
-        staticModelIds: modelIds,
+        staticModelIds: [...modelIds, ...catalogModelIds],
         customModelIds,
         aliasModelIds,
       });
@@ -494,7 +507,8 @@ export async function buildModelsList(kindFilter) {
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
         const customKind = customModelKindById.get(modelId);
         const liveKind = liveModelKindById.get(modelId);
-        const kind = customKind || liveKind || staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
+        const catalogModel = catalogModelById.get(modelId);
+        const kind = customKind || liveKind || catalogModel?.kind || staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
         // imageToText custom models stay in the LLM list (vision-capable chat models)
         const allowAsLlm = kind === "imageToText" && kindFilter.includes(LLM_KIND);
         if (!kindFilter.includes(kind) && !allowAsLlm) continue;
@@ -513,6 +527,7 @@ export async function buildModelsList(kindFilter) {
         // models without overrides keep the historical live/static result.
         const liveCaps = liveCapabilitiesById.get(modelId) || null;
         const serviceKind = customKind || liveKind || null;
+        const catalogCaps = catalogModel?.capabilities || null;
         const customCaps = customModelCapabilitiesById.get(modelId) || null;
         // Preserve the historical shape: only attach a capabilities block where
         // there is a runtime-capable kind (LLM) or a media kind was declared by
@@ -524,7 +539,7 @@ export async function buildModelsList(kindFilter) {
             model: modelId,
             serviceKind,
             liveCapabilities: liveCaps,
-            persisted: customCaps,
+            persisted: { ...(catalogCaps || {}), ...(customCaps || {}) },
           })
           : null;
         if (caps) {

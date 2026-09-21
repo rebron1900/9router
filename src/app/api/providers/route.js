@@ -9,6 +9,7 @@ import {
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import { normalizeProviderId, normalizeProviderSpecificData } from "@/lib/providerNormalization";
+import { syncCompatibleProviderModelCatalog } from "@/lib/providerModelDiscovery";
 
 export const dynamic = "force-dynamic";
 
@@ -184,6 +185,17 @@ export async function POST(request) {
       isActive: true,
       testStatus: testStatus || "unknown",
     });
+
+    // Best-effort first catalog sync. Connection creation must still succeed when
+    // the upstream /models endpoint is unavailable; the detail page can retry.
+    if (isOpenAICompatibleProvider(provider) || isAnthropicCompatibleProvider(provider)) {
+      try {
+        const catalogResult = await syncCompatibleProviderModelCatalog(newConnection);
+        if (catalogResult.error) console.log("Initial provider model catalog sync failed:", catalogResult.error);
+      } catch (catalogError) {
+        console.log("Initial provider model catalog sync failed:", catalogError.message);
+      }
+    }
 
     // Hide sensitive fields
     const result = { ...newConnection };

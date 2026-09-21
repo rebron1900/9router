@@ -22,6 +22,8 @@ export {
   getModelAliases, setModelAlias, deleteModelAlias,
   getCustomModels, addCustomModel, deleteCustomModel,
   getMitmAlias, setMitmAliasAll,
+  getProviderModelCatalog, getProviderModelCatalogs,
+  upsertProviderModelCatalog, deleteProviderModelCatalog, clearProviderModelCatalog,
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
   exportDb, importDb,
 } from "@/lib/db/index.js";

@@ -18,6 +18,16 @@ describe("model discovery policy", () => {
     })).toEqual([]);
   });
 
+  it("keeps persisted catalog models in the configured base list", () => {
+    const connection = { providerSpecificData: {} };
+    expect(configuredModelIds({
+      connection,
+      staticModelIds: ["catalog-model"],
+      customModelIds: [],
+      aliasModelIds: [],
+    })).toEqual(["catalog-model"]);
+  });
+
   it("keeps registered custom models while excluding unregistered upstream models", () => {
     const connection = { providerSpecificData: {} };
     expect(configuredModelIds({

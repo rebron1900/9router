@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings, getStandardModelByName, getStandardModelBindings } from "@/lib/localDb";
+import { getSettings, getStandardModelByName, getStandardModelBindings, getProviderNodes } from "@/lib/localDb";
 import { createCapabilityResolver, loadCustomModelCapabilityOverrides, resolveCapabilities } from "@/lib/modelCapabilities";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -43,6 +43,23 @@ import {
 } from "@/lib/standardModels/runtime";
 
 const COMMANDCODE_TRANSIENT_RETRY_DELAY_MS = 250;
+
+// Display-only resolver for combo log lines: maps a "providerId/model" string
+// to "providerName/model" for custom provider nodes (opaque generated ids).
+// Built once per call; falls back to the raw string when no node matches.
+async function buildComboModelLabel() {
+  const nodes = await getProviderNodes();
+  const nameById = new Map();
+  for (const node of nodes) {
+    if (node?.id && node?.name) nameById.set(node.id, node.name);
+  }
+  return (modelStr) => {
+    if (nameById.size === 0 || typeof modelStr !== "string" || !modelStr.includes("/")) return modelStr;
+    const [providerId, ...rest] = modelStr.split("/");
+    const name = nameById.get(providerId);
+    return name ? `${name}/${rest.join("/")}` : modelStr;
+  };
+}
 
 function waitForCommandCodeRetry(signal, delayMs = COMMANDCODE_TRANSIENT_RETRY_DELAY_MS) {
   if (!delayMs || signal?.aborted) return Promise.resolve();
@@ -256,7 +273,8 @@ export async function handleChat(request, clientRawRequest = null) {
       comboName: modelStr,
       comboStrategy,
       comboStickyLimit,
-      capabilityResolver
+      capabilityResolver,
+      modelLabel: await buildComboModelLabel(),
     });
   }
 
@@ -277,7 +295,8 @@ export async function handleChat(request, clientRawRequest = null) {
       log,
       comboName: modelStr,
       comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
-      capabilityResolver
+      capabilityResolver,
+      modelLabel: await buildComboModelLabel(),
     });
   }
 
@@ -427,6 +446,7 @@ async function handleStandardModelChat({ body, modelStr, standardModel, required
     capabilityResolver,
     attemptBudget: routeBudget,
     abortSignal: request?.signal,
+    modelLabel: await buildComboModelLabel(),
     // A standard route already has another provider candidate; do not spend
     // the legacy combo transient sleep before probing it.
     failureClassifier: ({ status, errorText }) => {
@@ -532,7 +552,8 @@ export async function handleSingleModelChat(body, modelStr, clientRawRequest = n
         comboName: modelStr,
         comboStrategy,
         comboStickyLimit,
-        capabilityResolver
+        capabilityResolver,
+        modelLabel: await buildComboModelLabel(),
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -638,7 +659,7 @@ export async function handleSingleModelChat(body, modelStr, clientRawRequest = n
       : null;
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
-      modelInfo: { provider, model },
+      modelInfo: { provider, model, providerName: modelInfo.providerName },
       modelCapabilities,
       credentials: refreshedCredentials,
       log,

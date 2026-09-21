@@ -217,6 +217,53 @@ describe("standard model route runtime", () => {
     }
   });
 
+  it("commits the route budget before returning a preflighted stream", async () => {
+    vi.useFakeTimers();
+    const budget = createStandardRouteBudget({ maxAttempts: 2, timeoutMs: 100 });
+    const streamController = createStreamController({
+      externalSignal: budget.signal,
+      provider: "provider-a",
+      model: "model-a",
+      log: {},
+    });
+    const onRouteCommit = vi.fn(() => budget.commit());
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl_2","choices":[{"delta":{"content":"hello"}}]}\\n\\n'));
+        controller.close();
+      },
+    });
+
+    try {
+      const result = await handleStreamingResponse({
+        providerResponse: new Response(upstreamBody, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        provider: "provider-a",
+        model: "model-a",
+        sourceFormat: FORMATS.OPENAI,
+        targetFormat: FORMATS.OPENAI,
+        body: { stream: true },
+        stream: true,
+        requestStartTime: Date.now(),
+        streamController,
+        attemptBudget: budget,
+        preflightStream: true,
+        onRouteCommit,
+      });
+
+      expect(result.success).toBe(true);
+      const reader = result.response.body.getReader();
+      await reader.read();
+      expect(onRouteCommit).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(101);
+      expect(budget.signal.aborted).toBe(false);
+      await reader.cancel();
+    } finally {
+      budget.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("falls back on a non-stream provider failure and returns the successful response", async () => {
     const tried = [];
     const response = await handleComboChat({

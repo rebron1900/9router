@@ -12,6 +12,7 @@ import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { persistProviderModelCatalog } from "@/lib/modelCatalog.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -502,6 +503,24 @@ export async function GET(request, { params }) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
 
+    const respondWithModels = async (models, extra = {}) => {
+      const catalogModels = Array.isArray(models) ? models : [];
+      try {
+        await persistProviderModelCatalog(connection.provider, catalogModels, {
+          providerAlias: connection.providerSpecificData?.prefix,
+          markMissingStale: !extra.warning,
+        });
+      } catch (catalogError) {
+        console.warn("Failed to persist provider model catalog:", catalogError.message);
+      }
+      return NextResponse.json({
+        provider: connection.provider,
+        connectionId: connection.id,
+        models: catalogModels,
+        ...extra,
+      });
+    };
+
     if (isOpenAICompatibleProvider(connection.provider)) {
       const baseUrl = connection.providerSpecificData?.baseUrl;
       if (!baseUrl) {
@@ -527,12 +546,7 @@ export async function GET(request, { params }) {
 
       const data = await response.json();
       const models = data.data || data.models || [];
-
-      return NextResponse.json({
-        provider: connection.provider,
-        connectionId: connection.id,
-        models
-      });
+      return await respondWithModels(models);
     }
 
     if (isAnthropicCompatibleProvider(connection.provider)) {
@@ -568,22 +582,14 @@ export async function GET(request, { params }) {
 
       const data = await response.json();
       const models = data.data || data.models || [];
-
-      return NextResponse.json({
-        provider: connection.provider,
-        connectionId: connection.id,
-        models
-      });
+      return await respondWithModels(models);
     }
 
     const config = PROVIDER_MODELS_CONFIG[connection.provider];
     if (!config) {
       const staticModels = getStaticProviderModels(connection.provider);
       if (staticModels.length > 0) {
-        return NextResponse.json({
-          provider: connection.provider,
-          connectionId: connection.id,
-          models: staticModels,
+        return await respondWithModels(staticModels, {
           warning: `Provider ${connection.provider} does not expose a live models endpoint; using the built-in provider model catalog.`,
         });
       }
@@ -599,12 +605,7 @@ export async function GET(request, { params }) {
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: result.status || 500 });
       }
-      return NextResponse.json({
-        provider: connection.provider,
-        connectionId: connection.id,
-        models: result.models,
-        ...(result.warning ? { warning: result.warning } : {})
-      });
+      return await respondWithModels(result.models, result.warning ? { warning: result.warning } : {});
     }
 
     // Get auth token
@@ -649,11 +650,7 @@ export async function GET(request, { params }) {
     const data = await response.json();
     const models = config.parseResponse(data);
 
-    return NextResponse.json({
-      provider: connection.provider,
-      connectionId: connection.id,
-      models
-    });
+    return await respondWithModels(models);
   } catch (error) {
     console.log("Error fetching provider models:", error);
     return NextResponse.json({ error: "Failed to fetch models" }, { status: 500 });

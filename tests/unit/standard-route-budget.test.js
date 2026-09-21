@@ -127,6 +127,38 @@ describe("standard route budget at the executor boundary", () => {
     }
   });
 
+  it("does not return a successful Codex stream after the route budget aborts its preflight peek", async () => {
+    const { CodexExecutor } = await import("../../open-sse/executors/codex.js");
+    const budget = createStandardRouteBudget({ maxAttempts: 2, timeoutMs: 30 });
+    const encoder = new TextEncoder();
+    fetchMock.mockImplementation(async (_url, options = {}) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_test" } })}\n\n`));
+          const signal = options?.signal;
+          signal?.addEventListener?.("abort", () => controller.error(signal.reason), { once: true });
+        },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+
+    try {
+      const execution = new CodexExecutor().execute({
+        model: "gpt-5.6-luna",
+        body: { model: "gpt-5.6-luna", input: "hello", stream: true },
+        stream: true,
+        credentials: { apiKey: "test" },
+        attemptBudget: budget,
+        proxyOptions: { attemptBudget: budget },
+      });
+      const rejected = expect(execution).rejects.toMatchObject({ code: "STANDARD_ROUTE_BUDGET_EXHAUSTED" });
+      await vi.waitFor(() => expect(budget.signal.aborted).toBe(true));
+      await rejected;
+    } finally {
+      budget.dispose();
+    }
+  });
+
   it("keeps a custom executor budget rejection out of its generic 502 response", async () => {
     const { GrokWebExecutor } = await import("../../open-sse/executors/grok-web.js");
     const budget = createStandardRouteBudget({ maxAttempts: 1, timeoutMs: 5_000 });

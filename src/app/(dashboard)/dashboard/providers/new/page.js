@@ -58,7 +58,7 @@ export default function NewProviderPage() {
       });
 
       if (response.ok) {
-        router.push("/dashboard/providers");
+        router.push("/dashboard/model-management?tab=providers");
       } else {
         const data = await response.json();
         setErrors({ submit: data.error || "Failed to create provider" });
@@ -77,7 +77,7 @@ export default function NewProviderPage() {
       {/* Header */}
       <div className="mb-8">
         <Link
-          href="/dashboard/providers"
+          href="/dashboard/model-management?tab=providers"
           className="inline-flex items-center gap-1 text-sm text-text-muted hover:text-primary transition-colors mb-4"
         >
           <span className="material-symbols-outlined text-lg">arrow_back</span>
@@ -203,7 +203,7 @@ export default function NewProviderPage() {
 
           {/* Actions */}
           <div className="flex gap-3 pt-4 border-t border-border">
-            <Link href="/dashboard/providers" className="flex-1">
+            <Link href="/dashboard/model-management?tab=providers" className="flex-1">
               <Button type="button" variant="ghost" fullWidth>
                 Cancel
               </Button>

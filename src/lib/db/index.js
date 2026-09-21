@@ -55,6 +55,16 @@ export {
   getMitmAlias, setMitmAliasAll,
 } from "./repos/aliasRepo.js";
 
+// Provider model catalog
+export {
+  MODEL_CATALOG_SCOPE,
+  getProviderModelCatalog,
+  getProviderModelCatalogs,
+  upsertProviderModelCatalog,
+  deleteProviderModelCatalog,
+  clearProviderModelCatalog,
+} from "./repos/modelCatalogRepo.js";
+
 // Pricing
 export {
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
@@ -130,12 +140,14 @@ export async function exportDb() {
     })),
     modelAliases: {},
     customModels: [],
+    providerModelCatalog: [],
     mitmAlias: {},
     pricing: {},
   };
 
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'modelAliases'`)) out.modelAliases[r.key] = parseJson(r.value);
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'customModels'`)) out.customModels.push(parseJson(r.value));
+  for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'providerModelCatalog'`)) out.providerModelCatalog.push(parseJson(r.value));
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'mitmAlias'`)) out.mitmAlias[r.key] = parseJson(r.value);
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'pricing'`)) out.pricing[r.key] = parseJson(r.value);
 
@@ -159,7 +171,7 @@ export async function importDb(payload) {
     db.run(`DELETE FROM standardModelMappings`);
     db.run(`DELETE FROM standardModelProviders`);
     db.run(`DELETE FROM standardModels`);
-    db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
+    db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'providerModelCatalog', 'mitmAlias', 'pricing')`);
 
     // Settings
     if (payload.settings) {
@@ -240,6 +252,11 @@ export async function importDb(payload) {
     for (const m of payload.customModels || []) {
       const k = `${m.providerAlias}|${m.id}|${m.type || "llm"}`;
       db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('customModels', ?, ?)`, [k, stringifyJson(m)]);
+    }
+    for (const m of payload.providerModelCatalog || []) {
+      if (!m?.providerId || !m?.modelId) continue;
+      const k = `${m.providerId}|${m.modelId}|${m.kind || "llm"}`;
+      db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('providerModelCatalog', ?, ?)`, [k, stringifyJson(m)]);
     }
     for (const [tool, mappings] of Object.entries(payload.mitmAlias || {})) {
       db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('mitmAlias', ?, ?)`, [tool, stringifyJson(mappings || {})]);

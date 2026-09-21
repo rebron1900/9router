@@ -75,6 +75,7 @@ describe("model routing", () => {
       .resolves.toEqual({
         provider: "openai-compatible-chat-test",
         model: "gpt-image-1",
+        providerName: "Compatible OCT",
       });
   });
 });
