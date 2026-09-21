@@ -1,3 +1,15 @@
+# v0.5.82 (2026-09-21)
+
+## Features
+- **WorkBuddy**: add the Tencent CodeBuddy international provider with device-code OAuth, identity headers, and billing quota tracking through the shared CodeBuddy usage handler.
+- **Model management**: persist discovered provider model catalogs in the local database, sync them when a compatible provider is created, and merge them into the dashboard and `/v1/models` listings with capabilities and staleness handling.
+- **Logging**: display custom provider nodes by their configured name instead of opaque generated ids in chat logs, combo fallback traces, and error lines.
+
+## Fixes
+- **Usage**: read cache-read tokens from nested usage details when the top-level alias reports zero.
+- **Codex**: honor client aborts while peeking for transient upstream errors and treat reasoning-summary deltas as normal stream content.
+- **Providers**: point provider detail and creation pages at the model-management tab.
+
 # v0.5.81 (2026-09-16)
 
 ## Features
